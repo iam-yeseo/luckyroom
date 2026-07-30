@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   BASE_STOCKS,
+  HORSE_NAMES,
+  HORSE_PAYOUT_RATES,
   LOTTO_BASE_PRIZES,
   PAPER_PRIZES,
   SPETTO_PRIZE_TABLE,
@@ -11,6 +13,8 @@ import {
   applyStockChange,
   calculateLottoPayout,
   calculateOtherIncomeTax,
+  createHorseRace,
+  createHorseRoster,
   createLottoRoundPrizes,
   createPaperBoard,
   derivativeRate,
@@ -155,4 +159,50 @@ test("market includes ten stocks and twelve leveraged products", () => {
   assert.ok(Math.abs(derivativeRate(0.05, 3, false) - 0.15) < 1e-10);
   assert.ok(Math.abs(derivativeRate(0.05, 3, true) + 0.15) < 1e-10);
   assert.equal(applyStockChange(1_050, -0.2), 1_000);
+});
+
+test("horse derby draws twelve unique names and settles the full payout flow", () => {
+  assert.equal(HORSE_NAMES.length, 20);
+  assert.deepEqual(HORSE_PAYOUT_RATES, [0.7, 0.2, 0.1]);
+
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const horses = createHorseRoster();
+    const selectedHorse = horses[0];
+    const race = createHorseRace(horses, selectedHorse, 1);
+
+    assert.equal(horses.length, 12);
+    assert.equal(new Set(horses).size, 12);
+    assert.ok(horses.every((horse) => HORSE_NAMES.includes(horse)));
+    assert.equal(race.poolTicks.length, 30);
+    assert.equal(race.poolTicks.at(-1).total, race.totalPool);
+    assert.equal(race.poolTicks.at(-1).participants, race.participantCount);
+    assert.ok(
+      race.poolTicks.every(
+        (tick) => tick.increment >= 100 && tick.increment <= 100_000_000,
+      ),
+    );
+    assert.ok(race.participantCount >= 50 && race.participantCount <= 500);
+    assert.equal(race.ranking.length, 12);
+    assert.equal(new Set(race.ranking).size, 12);
+    assert.ok(race.playerRank >= 1 && race.playerRank <= 12);
+    assert.equal(
+      Object.values(race.participantBets).reduce(
+        (sum, participants) => sum + participants,
+        0,
+      ),
+      race.participantCount,
+    );
+
+    if (race.playerRank <= 3) {
+      assert.equal(
+        race.payout,
+        Math.floor(
+          (race.totalPool * HORSE_PAYOUT_RATES[race.playerRank - 1]) /
+            race.winners,
+        ),
+      );
+    } else {
+      assert.equal(race.payout, 0);
+    }
+  }
 });

@@ -5,6 +5,7 @@ import {
   STOCK_PRODUCTS,
   applyStockChange,
   calculateLottoPayout,
+  createHorseRace,
   createLottoRoundPrizes,
   createPaperBoard,
   derivativeRate,
@@ -250,8 +251,8 @@ async function advanceMarket(): Promise<MarketRow[]> {
         phase_started_at: 0,
         updated_at: now,
       };
-    } else if (row.status === "active" && now - row.updated_at >= 10_000) {
-      const ticks = Math.min(12, Math.floor((now - row.updated_at) / 10_000));
+    } else if (row.status === "active" && now - row.updated_at >= 5_000) {
+      const ticks = Math.min(24, Math.floor((now - row.updated_at) / 5_000));
       let price = row.price;
       for (let index = 0; index < ticks; index += 1) {
         price = applyStockChange(price, randomBaseRate());
@@ -262,7 +263,7 @@ async function advanceMarket(): Promise<MarketRow[]> {
         ...next,
         previous_price: row.price,
         price,
-        updated_at: row.updated_at + ticks * 10_000,
+        updated_at: row.updated_at + ticks * 5_000,
       };
       if (price <= 1_000) {
         next.status = "suspended";
@@ -691,6 +692,39 @@ export async function POST(request: Request) {
           ? { rank: chosen.rank, prize: chosen.prize }
           : null,
       boardReset: remaining === 0,
+      state: await publicState(user.id),
+    });
+  }
+
+  if (action === "horse_race") {
+    const horses = body.horses;
+    const selectedHorse = String(body.selectedHorse ?? "");
+    const betAmount = Number(body.betAmount);
+
+    if (!Number.isSafeInteger(betAmount) || betAmount < 1) {
+      return jsonError("배팅 금액은 1 C 이상 입력해주세요.");
+    }
+    if (betAmount > profile.balance) {
+      return jsonError("보유 코인보다 많이 배팅할 수 없습니다.");
+    }
+
+    let race;
+    try {
+      race = createHorseRace(horses as string[], selectedHorse, betAmount);
+    } catch {
+      return jsonError("경주마를 다시 선택해주세요.");
+    }
+
+    await recordBalanceChange(
+      user.id,
+      race.payout - betAmount,
+      "horse_race",
+      `${selectedHorse} 경마 ${race.playerRank}위`,
+      now,
+    );
+
+    return NextResponse.json({
+      race,
       state: await publicState(user.id),
     });
   }

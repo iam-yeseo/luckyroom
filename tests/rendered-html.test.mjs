@@ -20,6 +20,7 @@ test("deployment build contains the public guest page and game API", async () =>
   assert.match(api, /action === "earn"/);
   assert.match(api, /action === "save_luck"/);
   assert.match(api, /action === "paper_pick"/);
+  assert.match(api, /action === "horse_race"/);
   assert.match(api, /action === "trade"/);
   assert.match(publicUser, /luckyroom_session/);
   assert.match(publicUser, /httpOnly: true/);
@@ -39,6 +40,11 @@ test("economy UI, new games, and product metadata are present", async () => {
   assert.match(page, /운 저장하기/);
   assert.match(page, /추억의 종이뽑기판/);
   assert.match(page, /주식 투자하기/);
+  assert.match(page, /행운 경마장/);
+  assert.match(page, /전체 자동 선택/);
+  assert.match(page, /전체 초기화/);
+  assert.match(page, /market-clock__progress/);
+  assert.match(page, /paper-result-modal/);
   assert.match(page, /\[1000, 2000\]/);
   assert.match(page, /aria-pressed|aria-live/);
   assert.match(layout, /const title = "운빨 실험실/);
@@ -48,6 +54,8 @@ test("economy UI, new games, and product metadata are present", async () => {
   assert.match(css, /\.number-grid/);
   assert.match(css, /\.paper-board/);
   assert.match(css, /\.stock-table/);
+  assert.match(css, /\.horse-track/);
+  assert.match(css, /\.paper-result-modal/);
   assert.match(css, /\.luck-modal/);
   assert.match(css, /@media \(max-width: 640px\)/);
   assert.match(css, /prefers-reduced-motion: reduce/);

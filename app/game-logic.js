@@ -128,6 +128,31 @@ export const STOCK_PRODUCTS = Object.freeze([
   ]),
 ]);
 
+export const HORSE_NAMES = Object.freeze([
+  "타재",
+  "칼릭스",
+  "불가사리",
+  "우갈",
+  "우꼬",
+  "푸실",
+  "캐롯",
+  "루시안",
+  "릴리아",
+  "샤이어",
+  "아리오스",
+  "샤비",
+  "늠름한갈기",
+  "길게내린꼬리",
+  "차분한갈기",
+  "길게내린갈기",
+  "앨리",
+  "그리폰",
+  "백마탄공주",
+  "티거",
+]);
+
+export const HORSE_PAYOUT_RATES = Object.freeze([0.7, 0.2, 0.1]);
+
 /**
  * Returns an unbiased integer from 0 (inclusive) to max (exclusive).
  * Web Crypto is used when available, with a Math.random fallback.
@@ -176,6 +201,91 @@ export function drawUniqueNumbers(count, max) {
   return shuffle(
     Array.from({ length: max }, (_, index) => index + 1),
   ).slice(0, count);
+}
+
+export function createHorseRoster() {
+  return shuffle(HORSE_NAMES).slice(0, 12);
+}
+
+/**
+ * Prepares the full 30-second betting pool and race result.
+ * @param {string[]} horses
+ * @param {string} selectedHorse
+ * @param {number} betAmount
+ */
+export function createHorseRace(horses, selectedHorse, betAmount) {
+  if (
+    !Array.isArray(horses) ||
+    horses.length !== 12 ||
+    new Set(horses).size !== 12 ||
+    !horses.every((horse) => HORSE_NAMES.includes(horse))
+  ) {
+    throw new RangeError("invalid horse roster");
+  }
+  if (!horses.includes(selectedHorse)) {
+    throw new RangeError("selected horse is not in the race");
+  }
+  if (!Number.isSafeInteger(betAmount) || betAmount < 1) {
+    throw new RangeError("bet must be a positive safe integer");
+  }
+
+  const participantCount = randomInt(451) + 50;
+  const participantBets = Object.fromEntries(
+    horses.map((horse) => [horse, 1]),
+  );
+  for (let index = 12; index < participantCount; index += 1) {
+    const horse = horses[randomInt(horses.length)];
+    participantBets[horse] += 1;
+  }
+
+  const poolTicks = [];
+  let totalPool = betAmount;
+  let previousParticipants = 1;
+  for (let index = 0; index < 30; index += 1) {
+    const increment = randomInt(99_999_901) + 100;
+    totalPool += increment;
+    const timeRatio = (index + 1) / 30;
+    const jitter = index === 29 ? 0 : randomInt(17) - 8;
+    const participants =
+      index === 29
+        ? participantCount
+        : Math.min(
+            participantCount,
+            Math.max(
+              previousParticipants,
+              Math.round(participantCount * timeRatio) + jitter,
+            ),
+          );
+    previousParticipants = participants;
+    poolTicks.push({
+      second: index + 1,
+      increment,
+      total: totalPool,
+      participants,
+    });
+  }
+
+  const ranking = shuffle(horses);
+  const playerRank = ranking.indexOf(selectedHorse) + 1;
+  const payoutRate = HORSE_PAYOUT_RATES[playerRank - 1] ?? 0;
+  const winners = participantBets[selectedHorse];
+  const payout =
+    payoutRate > 0 ? Math.floor((totalPool * payoutRate) / winners) : 0;
+
+  return {
+    horses: [...horses],
+    selectedHorse,
+    betAmount,
+    poolTicks,
+    totalPool,
+    participantCount,
+    participantBets,
+    ranking,
+    playerRank,
+    payoutRate,
+    winners,
+    payout,
+  };
 }
 
 /**

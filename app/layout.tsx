@@ -4,7 +4,7 @@ import "./globals.css";
 
 const title = "운빨 실험실 | 코인으로 시험하는 오늘의 운";
 const description =
-  "100만 C로 시작해 로또, 즉석김밥, 종이뽑기판과 랜덤 주식 시장에서 오늘의 운을 시험하는 코인 아케이드입니다.";
+  "100만 C로 시작해 로또, 즉석김밥, 종이뽑기판, 랜덤 주식과 행운 경마장에서 오늘의 운을 시험하는 코인 아케이드입니다.";
 
 export async function generateMetadata(): Promise<Metadata> {
   const requestHeaders = await headers();
@@ -35,6 +35,7 @@ export async function generateMetadata(): Promise<Metadata> {
       "즉석복권",
       "종이뽑기",
       "모의 주식",
+      "경마 게임",
     ],
     openGraph: {
       title: "운빨 실험실",
@@ -45,9 +46,9 @@ export async function generateMetadata(): Promise<Metadata> {
       images: [
         {
           url: socialImage,
-          width: 1733,
-          height: 908,
-          alt: "로또, 즉석김밥, 종이뽑기판과 주식 게임이 담긴 운빨 실험실",
+          width: 1731,
+          height: 909,
+          alt: "로또, 즉석김밥, 종이뽑기판, 주식과 경마 게임이 담긴 운빨 실험실",
         },
       ],
     },

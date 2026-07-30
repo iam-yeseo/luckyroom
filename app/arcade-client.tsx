@@ -9,13 +9,21 @@ import {
 } from "react";
 import {
   SCRATCH_TYPES,
+  createHorseRoster,
   drawUniqueNumbers,
   formatCoins,
   randomInt,
 } from "./game-logic";
 
-type GameId = "lotto" | "gimbap" | "paper" | "stock";
+type GameId = "lotto" | "gimbap" | "paper" | "stock" | "horse";
 type StockStatus = "active" | "suspended" | "delisted";
+type HorseRacePhase =
+  | "idle"
+  | "select"
+  | "bet"
+  | "waiting"
+  | "racing"
+  | "result";
 
 type Profile = {
   email: string;
@@ -110,6 +118,28 @@ type LottoRound = {
   netPrize: number;
 };
 
+type HorsePoolTick = {
+  second: number;
+  increment: number;
+  total: number;
+  participants: number;
+};
+
+type HorseRaceRound = {
+  horses: string[];
+  selectedHorse: string;
+  betAmount: number;
+  poolTicks: HorsePoolTick[];
+  totalPool: number;
+  participantCount: number;
+  participantBets: Record<string, number>;
+  ranking: string[];
+  playerRank: number;
+  payoutRate: number;
+  winners: number;
+  payout: number;
+};
+
 type ApiResponse = {
   state?: GameState;
   error?: string;
@@ -117,6 +147,7 @@ type ApiResponse = {
   saved?: number;
   ticket?: ScratchTicket;
   lotto?: LottoRound;
+  race?: HorseRaceRound;
   removedId?: string;
   result?: { rank: string; prize: number } | null;
   boardReset?: boolean;
@@ -139,6 +170,7 @@ const GAME_TABS: Array<{
   { id: "gimbap", index: "02", label: "즉석김밥", short: "김밥" },
   { id: "paper", index: "03", label: "종이뽑기판", short: "종이뽑기" },
   { id: "stock", index: "04", label: "주식 투자", short: "주식" },
+  { id: "horse", index: "05", label: "행운 경마", short: "경마" },
 ];
 
 const LOTTO_NUMBERS = Array.from({ length: 45 }, (_, index) => index + 1);
@@ -286,6 +318,7 @@ export default function ArcadeClient() {
   } | null>(null);
   const noticeTimerRef = useRef<number | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
+  const raceActiveRef = useRef(false);
 
   const showNotice = useCallback(
     (text: string, tone: "good" | "bad" | "plain" = "plain") => {
@@ -383,8 +416,8 @@ export default function ArcadeClient() {
 
   useEffect(() => {
     const timer = window.setInterval(() => {
-      void loadState(true);
-    }, 10_000);
+      if (!raceActiveRef.current) void loadState(true);
+    }, 5_000);
     return () => window.clearInterval(timer);
   }, [loadState]);
 
@@ -482,6 +515,14 @@ export default function ArcadeClient() {
     playTone(520);
   };
 
+  const autoPickAllLottoLines = () => {
+    setLottoEntries((entries) =>
+      entries.map(() => drawUniqueNumbers(6, 45).sort((a, b) => a - b)),
+    );
+    setLottoRound(null);
+    playTone(620, 0.12);
+  };
+
   const clearLottoLine = () => {
     setLottoEntries((entries) =>
       entries.map((entry, index) =>
@@ -489,6 +530,12 @@ export default function ArcadeClient() {
       ),
     );
     setLottoRound(null);
+  };
+
+  const clearAllLottoLines = () => {
+    setLottoEntries((entries) => entries.map(() => []));
+    setLottoRound(null);
+    playTone(240);
   };
 
   const playLotto = async () => {
@@ -575,6 +622,7 @@ export default function ArcadeClient() {
     rank: string;
     prize: number;
   } | null>(null);
+  const [paperPopupOpen, setPaperPopupOpen] = useState(false);
   const [paperRemovedId, setPaperRemovedId] = useState<string | null>(null);
   const paperAutoBusyRef = useRef(false);
   const hasGameState = Boolean(gameState);
@@ -623,6 +671,7 @@ export default function ArcadeClient() {
     setGameState(response.state);
     setPaperRemovedId(cellId);
     setPaperResult({ id: cellId, ...response.result });
+    setPaperPopupOpen(true);
     playTone(response.result.prize > 0 ? 820 : 190, 0.14, 0.04);
     showNotice(
       response.result.prize > 0
@@ -674,9 +723,151 @@ export default function ArcadeClient() {
     );
   };
 
+  const [horsePhase, setHorsePhase] = useState<HorseRacePhase>("idle");
+  const [horseRoster, setHorseRoster] = useState<string[]>([]);
+  const [selectedHorse, setSelectedHorse] = useState<string | null>(null);
+  const [horseBetAmount, setHorseBetAmount] = useState("");
+  const [horseRace, setHorseRace] = useState<HorseRaceRound | null>(null);
+  const [horsePoolTick, setHorsePoolTick] = useState(0);
+  const [horseRaceFrame, setHorseRaceFrame] = useState(0);
+  const [horseClaimed, setHorseClaimed] = useState(false);
+  const pendingRaceStateRef = useRef<GameState | null>(null);
+
+  const startHorseGame = () => {
+    if (raceActiveRef.current) return;
+    setHorseRoster(createHorseRoster());
+    setSelectedHorse(null);
+    setHorseBetAmount("");
+    setHorseRace(null);
+    setHorsePoolTick(0);
+    setHorseRaceFrame(0);
+    setHorseClaimed(false);
+    setHorsePhase("select");
+    playTone(480, 0.12);
+  };
+
+  const chooseHorse = (horse: string) => {
+    if (horsePhase !== "select" && horsePhase !== "bet") return;
+    setSelectedHorse(horse);
+    setHorsePhase("bet");
+    playTone(430 + horseRoster.indexOf(horse) * 18);
+  };
+
+  const startHorseRace = async () => {
+    const betAmount = Number(horseBetAmount.replaceAll(",", ""));
+    if (!selectedHorse) {
+      showNotice("응원할 말을 먼저 선택해주세요.", "bad");
+      return;
+    }
+    if (
+      !Number.isSafeInteger(betAmount) ||
+      betAmount < 1 ||
+      betAmount > (gameState?.profile.balance ?? 0)
+    ) {
+      showNotice("1 C 이상, 보유 코인 안에서 배팅해주세요.", "bad");
+      return;
+    }
+
+    raceActiveRef.current = true;
+    const response = await runAction("horse_race", {
+      action: "horse_race",
+      horses: horseRoster,
+      selectedHorse,
+      betAmount,
+    });
+    if (!response?.state || !response.race) {
+      raceActiveRef.current = false;
+      return;
+    }
+
+    pendingRaceStateRef.current = response.state;
+    setHorseRace(response.race);
+    setHorsePoolTick(0);
+    setHorseRaceFrame(0);
+    setHorseClaimed(false);
+    setHorsePhase("waiting");
+    playTone(560, 0.14);
+  };
+
+  useEffect(() => {
+    if (horsePhase !== "waiting" || !horseRace) return;
+    const timer = window.setInterval(() => {
+      setHorsePoolTick((current) => Math.min(30, current + 1));
+    }, 1_000);
+    return () => window.clearInterval(timer);
+  }, [horsePhase, horseRace]);
+
+  useEffect(() => {
+    if (horsePhase !== "waiting" || horsePoolTick < 30) return;
+    const timer = window.setTimeout(() => setHorsePhase("racing"), 0);
+    return () => window.clearTimeout(timer);
+  }, [horsePhase, horsePoolTick]);
+
+  useEffect(() => {
+    if (horsePhase !== "racing" || !horseRace) return;
+    const timer = window.setInterval(() => {
+      setHorseRaceFrame((current) => Math.min(20, current + 1));
+    }, 400);
+    return () => window.clearInterval(timer);
+  }, [horsePhase, horseRace]);
+
+  useEffect(() => {
+    if (horsePhase !== "racing" || horseRaceFrame < 20) return;
+    const timer = window.setTimeout(() => {
+      setHorsePhase("result");
+      playTone((horseRace?.payout ?? 0) > 0 ? 920 : 190, 0.18, 0.045);
+    }, 450);
+    return () => window.clearTimeout(timer);
+  }, [horsePhase, horseRace, horseRaceFrame, playTone]);
+
+  const claimHorseResult = () => {
+    if (horseClaimed) return;
+    if (pendingRaceStateRef.current) {
+      setGameState(pendingRaceStateRef.current);
+      pendingRaceStateRef.current = null;
+    }
+    raceActiveRef.current = false;
+    setHorseClaimed(true);
+    if ((horseRace?.payout ?? 0) > 0) {
+      showNotice(
+        `${formatCoins(horseRace?.payout ?? 0)} 당첨금을 받았습니다!`,
+        "good",
+      );
+    } else {
+      showNotice("경기가 종료됐습니다. 다음 경주에 다시 도전해보세요.");
+    }
+  };
+
+  const currentHorsePool =
+    horsePoolTick > 0
+      ? horseRace?.poolTicks[horsePoolTick - 1]
+      : undefined;
+  const horseWaitingSeconds = Math.max(0, 30 - horsePoolTick);
+  const horseLaneProgress = (horse: string, laneIndex: number) => {
+    if (!horseRace || horsePhase === "waiting") return 2;
+    const finishRank = horseRace.ranking.indexOf(horse);
+    const finishPosition = 94 - finishRank * 1.45;
+    if (horsePhase === "racing") {
+      const ratio = horseRaceFrame / 20;
+      const stride =
+        horseRaceFrame < 20
+          ? Math.sin((horseRaceFrame + laneIndex) * 1.7) * 1.6
+          : 0;
+      return Math.max(2, Math.min(finishPosition, finishPosition * ratio + stride));
+    }
+    if (horsePhase === "result") return finishPosition;
+    return 2;
+  };
+
   const visibleBalance =
     (gameState?.profile.balance ?? 0) -
-    (scratchPendingReveal ? scratchTicket?.prize ?? 0 : 0);
+    (scratchPendingReveal ? scratchTicket?.prize ?? 0 : 0) -
+    ((horsePhase === "waiting" ||
+      horsePhase === "racing" ||
+      horsePhase === "result") &&
+    !horseClaimed
+      ? horseRace?.betAmount ?? 0
+      : 0);
   const accountOwner = gameState?.profile ?? {
     displayName: "행운 손님",
     email: "브라우저별 자동 저장",
@@ -686,6 +877,12 @@ export default function ArcadeClient() {
     [gameState?.paperBoard.availableIds],
   );
   const currentLottoEntry = lottoEntries[activeLottoLine] ?? [];
+  const stockCycleProgress = selectedStock
+    ? Math.min(1, Math.max(0, (now - selectedStock.updatedAt) / 5_000))
+    : 0;
+  const stockSecondsLeft = selectedStock
+    ? Math.max(0, Math.ceil((selectedStock.updatedAt + 5_000 - now) / 1_000))
+    : 5;
 
   if (loading && !gameState) {
     return (
@@ -712,7 +909,7 @@ export default function ArcadeClient() {
           </span>
         </a>
 
-        <nav className="game-tabs game-tabs--four" aria-label="게임 선택">
+        <nav className="game-tabs game-tabs--five" aria-label="게임 선택">
           {GAME_TABS.map((tab) => (
             <button
               key={tab.id}
@@ -773,7 +970,7 @@ export default function ArcadeClient() {
             <span>코인을 불려보세요.</span>
           </h1>
           <p className="intro-description">
-            네 가지 랜덤 게임과 실시간 모의 주식 시장.
+            다섯 가지 랜덤 게임과 실시간 모의 주식 시장.
             <br />
             모든 코인은 게임 속 재화이며 실제 가치가 없습니다.
           </p>
@@ -891,7 +1088,7 @@ export default function ArcadeClient() {
 
               <div className="pick-toolbar">
                 <p>{String.fromCharCode(65 + activeLottoLine)}게임 번호 선택</p>
-                <div>
+                <div className="pick-toolbar__actions">
                   <button
                     type="button"
                     className="text-button"
@@ -905,6 +1102,21 @@ export default function ArcadeClient() {
                     onClick={clearLottoLine}
                   >
                     비우기
+                  </button>
+                  <span aria-hidden="true" />
+                  <button
+                    type="button"
+                    className="text-button"
+                    onClick={autoPickAllLottoLines}
+                  >
+                    전체 자동 선택
+                  </button>
+                  <button
+                    type="button"
+                    className="text-button text-button--muted"
+                    onClick={clearAllLottoLines}
+                  >
+                    전체 초기화
                   </button>
                 </div>
               </div>
@@ -1415,12 +1627,22 @@ export default function ArcadeClient() {
             <div>
               <p className="game-number">GAME 04 · LUCK EXCHANGE</p>
               <h2>주식 투자하기</h2>
-              <p>10초마다 움직이는 10개 종목과 레버리지 상품에 투자하세요.</p>
+              <p>5초마다 움직이는 10개 종목과 레버리지 상품에 투자하세요.</p>
             </div>
             <div className="market-clock">
               <i />
               <span>LUCK EXCHANGE</span>
-              <strong>10초 주기</strong>
+              <strong>{stockSecondsLeft}초 후 주가 변경</strong>
+              <div
+                className="market-clock__progress"
+                role="progressbar"
+                aria-label="다음 주가 변경까지 진행률"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={Math.round(stockCycleProgress * 100)}
+              >
+                <span style={{ width: `${stockCycleProgress * 100}%` }} />
+              </div>
             </div>
           </div>
 
@@ -1629,12 +1851,383 @@ export default function ArcadeClient() {
               <i>+</i>
             </summary>
             <p>
-              주가는 10초마다 -10%~+10% 범위에서 무작위 변동합니다.
+              주가는 5초마다 -10%~+10% 범위에서 무작위 변동합니다.
               사성전자·아이닉스·GAVER에는 정방향/인버스 2배·3배 상품이
               있습니다. 가격이 1,000 C에 닿으면 60초 거래정지 후
               상장폐지되며, 120초 뒤 랜덤 가격으로 재상장합니다.
             </p>
           </details>
+        </div>
+
+        <div
+          id="horse-panel"
+          className={`game-panel ${activeGame === "horse" ? "is-active" : ""}`}
+          aria-hidden={activeGame !== "horse"}
+        >
+          <div className="panel-heading panel-heading--horse">
+            <div>
+              <p className="game-number">GAME 05 · LUCKY DERBY</p>
+              <h2>행운 경마장</h2>
+              <p>무작위로 출전한 12마리 중 한 마리를 골라 결승선을 지켜보세요.</p>
+            </div>
+            <div className="horse-rule-chip">
+              <span>상금 배분</span>
+              <strong>70 · 20 · 10</strong>
+              <small>1위부터 3위까지</small>
+            </div>
+          </div>
+
+          {horsePhase === "idle" && (
+            <section className="horse-start-card">
+              <div className="horse-start-card__mark" aria-hidden="true">
+                <span>♞</span>
+              </div>
+              <p className="card-step">TODAY&apos;S RANDOM DERBY</p>
+              <h3>
+                열두 마리의 이름도,
+                <br />
+                우승마도 매번 달라집니다.
+              </h3>
+              <p>
+                출전 명단을 연 뒤 한 마리를 선택하고 1 C부터 보유 코인까지
+                자유롭게 배팅하세요.
+              </p>
+              <button
+                type="button"
+                className="primary-button primary-button--race"
+                onClick={startHorseGame}
+              >
+                <span aria-hidden="true">♞</span>
+                게임 시작
+              </button>
+            </section>
+          )}
+
+          {(horsePhase === "select" || horsePhase === "bet") && (
+            <div className="horse-entry-layout">
+              <section className="horse-roster">
+                <div className="horse-section-title">
+                  <div>
+                    <p className="card-step">STEP 1 · PICK A HORSE</p>
+                    <h3>오늘의 출전마 12</h3>
+                  </div>
+                  <span>{selectedHorse ? "선택 완료" : "한 마리를 선택하세요"}</span>
+                </div>
+                <div className="horse-roster-grid">
+                  {horseRoster.map((horse, index) => (
+                    <button
+                      type="button"
+                      key={horse}
+                      className={selectedHorse === horse ? "is-selected" : ""}
+                      aria-pressed={selectedHorse === horse}
+                      onClick={() => chooseHorse(horse)}
+                    >
+                      <span>{String(index + 1).padStart(2, "0")}</span>
+                      <i aria-hidden="true">♞</i>
+                      <strong>{horse}</strong>
+                      <small>
+                        {selectedHorse === horse ? "MY PICK" : "선택하기"}
+                      </small>
+                    </button>
+                  ))}
+                </div>
+              </section>
+
+              <aside className="horse-bet-ticket">
+                <p className="card-step">STEP 2 · PLACE A BET</p>
+                <span className="horse-bet-ticket__icon" aria-hidden="true">
+                  ♞
+                </span>
+                <h3>{selectedHorse ?? "출전마 선택 전"}</h3>
+                <p>
+                  {selectedHorse
+                    ? "선택한 말에 걸 코인을 입력하세요."
+                    : "왼쪽 출전 명단에서 응원할 말을 골라주세요."}
+                </p>
+                <div className="horse-wallet">
+                  <span>배팅 가능</span>
+                  <strong>{formatCoins(gameState?.profile.balance ?? 0)}</strong>
+                </div>
+                <label className="horse-bet-input">
+                  <span>배팅 금액</span>
+                  <div>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      placeholder="최소 1"
+                      value={horseBetAmount}
+                      disabled={!selectedHorse}
+                      onChange={(event) =>
+                        setHorseBetAmount(
+                          event.target.value
+                            .replaceAll(/[^0-9]/g, "")
+                            .replace(/\B(?=(\d{3})+(?!\d))/g, ","),
+                        )
+                      }
+                    />
+                    <b>C</b>
+                  </div>
+                </label>
+                <div className="horse-bet-quick">
+                  {[1_000, 10_000, 100_000].map((amount) => (
+                    <button
+                      type="button"
+                      key={amount}
+                      disabled={
+                        !selectedHorse ||
+                        amount > (gameState?.profile.balance ?? 0)
+                      }
+                      onClick={() =>
+                        setHorseBetAmount(amount.toLocaleString("ko-KR"))
+                      }
+                    >
+                      {amount >= 100_000 ? "10만" : amount >= 10_000 ? "1만" : "1천"}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    disabled={!selectedHorse}
+                    onClick={() =>
+                      setHorseBetAmount(
+                        (gameState?.profile.balance ?? 0).toLocaleString("ko-KR"),
+                      )
+                    }
+                  >
+                    전액
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  className="primary-button primary-button--race"
+                  onClick={startHorseRace}
+                  disabled={
+                    !selectedHorse ||
+                    busyAction === "horse_race" ||
+                    Number(horseBetAmount.replaceAll(",", "")) < 1 ||
+                    Number(horseBetAmount.replaceAll(",", "")) >
+                      (gameState?.profile.balance ?? 0)
+                  }
+                >
+                  {busyAction === "horse_race"
+                    ? "배팅 접수 중…"
+                    : "배팅 확정하고 입장"}
+                </button>
+                <small className="horse-bet-note">
+                  배팅 확정 후에는 취소할 수 없습니다.
+                </small>
+              </aside>
+            </div>
+          )}
+
+          {horsePhase === "waiting" && horseRace && (
+            <section className="horse-waiting-board">
+              <div className="horse-waiting-title">
+                <div>
+                  <p className="card-step">BETTING LIVE</p>
+                  <h3>경기 시작 전 배팅 집계</h3>
+                </div>
+                <span>
+                  <strong>{horseWaitingSeconds}</strong>초
+                </span>
+              </div>
+              <div className="horse-tote">
+                <div>
+                  <span>누적 배팅금</span>
+                  <strong>
+                    {formatCoins(currentHorsePool?.total ?? horseRace.betAmount)}
+                  </strong>
+                  <small>
+                    방금 +{formatCoins(currentHorsePool?.increment ?? 0)}
+                  </small>
+                </div>
+                <div>
+                  <span>참가자</span>
+                  <strong>
+                    {(currentHorsePool?.participants ?? 1).toLocaleString("ko-KR")}
+                    명
+                  </strong>
+                  <small>최대 500명 실시간 집계</small>
+                </div>
+                <div>
+                  <span>나의 선택</span>
+                  <strong>{horseRace.selectedHorse}</strong>
+                  <small>{formatCoins(horseRace.betAmount)} 배팅</small>
+                </div>
+              </div>
+              <div
+                className="horse-waiting-progress"
+                role="progressbar"
+                aria-label="경기 시작 전 대기 시간"
+                aria-valuemin={0}
+                aria-valuemax={30}
+                aria-valuenow={horsePoolTick}
+              >
+                <span style={{ width: `${(horsePoolTick / 30) * 100}%` }} />
+              </div>
+              <div className="horse-waiting-roster" aria-label="출전 대기 중인 말">
+                {horseRace.horses.map((horse, index) => (
+                  <span
+                    key={horse}
+                    className={horse === horseRace.selectedHorse ? "is-mine" : ""}
+                  >
+                    {index + 1}. {horse}
+                  </span>
+                ))}
+              </div>
+              <p className="horse-waiting-message">
+                매초 100 C부터 1억 C 사이의 배팅이 새로 모입니다.
+              </p>
+            </section>
+          )}
+
+          {(horsePhase === "racing" || horsePhase === "result") && horseRace && (
+            <div className="horse-race-layout">
+              <section className="horse-track-card">
+                <div className="horse-track-title">
+                  <div>
+                    <p className="card-step">
+                      {horsePhase === "racing" ? "RACE LIVE" : "RACE FINISHED"}
+                    </p>
+                    <h3>
+                      {horsePhase === "racing"
+                        ? "결승선을 향해 달리는 중"
+                        : "최종 순위가 확정됐습니다"}
+                    </h3>
+                  </div>
+                  <span className={horsePhase === "racing" ? "is-live" : ""}>
+                    {horsePhase === "racing" ? "LIVE" : "FINISH"}
+                  </span>
+                </div>
+                <div className="horse-track" aria-label="경마 경기 진행">
+                  {horseRace.horses.map((horse, index) => {
+                    const finishRank = horseRace.ranking.indexOf(horse) + 1;
+                    return (
+                      <div
+                        className={`horse-lane ${
+                          horse === horseRace.selectedHorse ? "is-mine" : ""
+                        }`}
+                        key={horse}
+                      >
+                        <span className="horse-lane__number">{index + 1}</span>
+                        <span className="horse-lane__name">{horse}</span>
+                        <span className="horse-lane__rail" aria-hidden="true" />
+                        <span
+                          className="horse-runner"
+                          aria-label={`${horse} ${
+                            horsePhase === "result" ? `${finishRank}위` : "경주 중"
+                          }`}
+                          style={{ left: `${horseLaneProgress(horse, index)}%` }}
+                        >
+                          <i>♞</i>
+                        </span>
+                        {horsePhase === "result" && (
+                          <b className={finishRank <= 3 ? "is-podium" : ""}>
+                            {finishRank}위
+                          </b>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
+
+              <aside className="horse-live-ticket">
+                <p className="card-step">
+                  {horsePhase === "racing" ? "MY BET" : "FINAL RESULT"}
+                </p>
+                {horsePhase === "racing" ? (
+                  <>
+                    <span className="horse-live-ticket__mark" aria-hidden="true">
+                      ♞
+                    </span>
+                    <h3>{horseRace.selectedHorse}</h3>
+                    <p>나의 말이 결승선을 향해 달리고 있습니다.</p>
+                    <dl>
+                      <div>
+                        <dt>최종 배팅금</dt>
+                        <dd>{formatCoins(horseRace.totalPool)}</dd>
+                      </div>
+                      <div>
+                        <dt>참가자</dt>
+                        <dd>{horseRace.participantCount}명</dd>
+                      </div>
+                    </dl>
+                  </>
+                ) : (
+                  <>
+                    <span
+                      className={`horse-result-rank ${
+                        horseRace.playerRank <= 3 ? "is-win" : ""
+                      }`}
+                    >
+                      {horseRace.playerRank}위
+                    </span>
+                    <h3>{horseRace.selectedHorse}</h3>
+                    <p>
+                      {horseRace.playerRank <= 3
+                        ? `${Math.round(horseRace.payoutRate * 100)}% 상금 ${
+                            horseRace.winners
+                          }명 공동 분배`
+                        : "아쉽게도 이번 경주는 입상하지 못했습니다."}
+                    </p>
+                    <div className="horse-payout-total">
+                      <span>나의 당첨금</span>
+                      <strong>{formatCoins(horseRace.payout)}</strong>
+                    </div>
+                    <div className="horse-podium">
+                      {horseRace.ranking.slice(0, 3).map((horse, index) => (
+                        <div key={horse}>
+                          <span>{index + 1}</span>
+                          <strong>{horse}</strong>
+                          <small>
+                            {Math.round([0.7, 0.2, 0.1][index] * 100)}% ·{" "}
+                            {horseRace.participantBets[horse]}명
+                          </small>
+                        </div>
+                      ))}
+                    </div>
+                    <button
+                      type="button"
+                      className="primary-button primary-button--race"
+                      onClick={claimHorseResult}
+                      disabled={horseClaimed}
+                    >
+                      {horseClaimed
+                        ? horseRace.payout > 0
+                          ? "당첨금 수령 완료"
+                          : "결과 확인 완료"
+                        : horseRace.payout > 0
+                          ? "당첨금 수령"
+                          : "결과 확인"}
+                    </button>
+                    {horseClaimed && (
+                      <button
+                        type="button"
+                        className="horse-again-button"
+                        onClick={startHorseGame}
+                      >
+                        새 경주 시작
+                      </button>
+                    )}
+                  </>
+                )}
+              </aside>
+            </div>
+          )}
+
+          {horsePhase !== "idle" && (
+            <details className="rule-note horse-rule-note">
+              <summary>
+                <span>경마 배팅과 당첨금 규칙</span>
+                <i>+</i>
+              </summary>
+              <p>
+                경기 전 30초 동안 매초 100 C~1억 C가 누적되며 참가자 수는
+                50~500명 사이에서 정해집니다. 최종 누적금의 70%·20%·10%를
+                1~3위 선택자끼리 각각 똑같이 나눠 받습니다.
+              </p>
+            </details>
+          )}
         </div>
       </section>
 
@@ -1783,6 +2376,55 @@ export default function ArcadeClient() {
               }
             >
               되돌릴 수 없음에 동의하고 저장
+            </button>
+          </section>
+        </div>
+      )}
+
+      {paperPopupOpen && paperResult && (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setPaperPopupOpen(false);
+          }}
+        >
+          <section
+            className={`paper-result-modal ${
+              paperResult.prize > 0 ? "is-win" : ""
+            }`}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="paper-result-modal-title"
+          >
+            <button
+              type="button"
+              className="modal-close"
+              aria-label="결과 팝업 닫기"
+              onClick={() => setPaperPopupOpen(false)}
+            >
+              ×
+            </button>
+            <span className="paper-result-modal__ticket" aria-hidden="true">
+              {paperResult.id.replace("P", "")}
+            </span>
+            <p className="card-step">PAPER DRAW RESULT</p>
+            <h2 id="paper-result-modal-title">
+              {paperResult.prize > 0 ? "당첨!" : "아쉬운 꽝"}
+            </h2>
+            <strong>{paperResult.rank}</strong>
+            <span>{formatCoins(paperResult.prize)}</span>
+            <p>
+              {paperResult.prize > 0
+                ? "당첨금이 지갑에 바로 지급됐습니다."
+                : "다음 종이에는 행운이 숨어 있을지도 몰라요."}
+            </p>
+            <button
+              type="button"
+              className="primary-button"
+              onClick={() => setPaperPopupOpen(false)}
+            >
+              확인
             </button>
           </section>
         </div>
