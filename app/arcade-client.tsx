@@ -129,13 +129,6 @@ type ApiResponse = {
   };
 };
 
-type ArcadeClientProps = {
-  user: {
-    displayName: string;
-    email: string;
-  };
-};
-
 const GAME_TABS: Array<{
   id: GameId;
   index: string;
@@ -270,10 +263,6 @@ async function apiRequest(
   });
 
   const payload = (await response.json()) as ApiResponse | GameState;
-  if (response.status === 401) {
-    window.location.assign("/signin-with-chatgpt?return_to=%2F");
-    throw new Error("로그인이 필요합니다.");
-  }
   if (!response.ok) {
     throw new Error(
       "error" in payload && payload.error
@@ -284,7 +273,7 @@ async function apiRequest(
   return payload;
 }
 
-export default function ArcadeClient({ user }: ArcadeClientProps) {
+export default function ArcadeClient() {
   const [activeGame, setActiveGame] = useState<GameId>("lotto");
   const [gameState, setGameState] = useState<GameState | null>(null);
   const [loading, setLoading] = useState(true);
@@ -688,6 +677,10 @@ export default function ArcadeClient({ user }: ArcadeClientProps) {
   const visibleBalance =
     (gameState?.profile.balance ?? 0) -
     (scratchPendingReveal ? scratchTicket?.prize ?? 0 : 0);
+  const accountOwner = gameState?.profile ?? {
+    displayName: "행운 손님",
+    email: "브라우저별 자동 저장",
+  };
   const paperAvailable = useMemo(
     () => new Set(gameState?.paperBoard.availableIds ?? []),
     [gameState?.paperBoard.availableIds],
@@ -792,10 +785,14 @@ export default function ArcadeClient({ user }: ArcadeClientProps) {
             <span>LIVE</span>
           </div>
           <div className="account-owner">
-            <span>{user.displayName.slice(0, 1).toUpperCase()}</span>
+            <span>{accountOwner.displayName.slice(0, 1).toUpperCase()}</span>
             <div>
-              <strong>{user.displayName}</strong>
-              <small>{user.email}</small>
+              <strong>{accountOwner.displayName}</strong>
+              <small>
+                {accountOwner.email.startsWith("guest:")
+                  ? "이 브라우저에 자동 저장"
+                  : accountOwner.email}
+              </small>
             </div>
           </div>
           <dl>

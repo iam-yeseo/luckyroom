@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { NextResponse } from "next/server";
-import { getChatGPTUser } from "@/app/chatgpt-auth";
+import { getPublicUser } from "@/app/public-user";
 import {
   STOCK_PRODUCTS,
   applyStockChange,
@@ -122,9 +122,7 @@ async function ensureSchema() {
 }
 
 async function getApiUser() {
-  const user = await getChatGPTUser();
-  if (!user) return null;
-
+  const user = await getPublicUser();
   await ensureSchema();
   const now = Date.now();
   await db()
@@ -136,7 +134,7 @@ async function getApiUser() {
          display_name = excluded.display_name,
          updated_at = excluded.updated_at`,
     )
-    .bind(user.email, user.displayName, now, now)
+    .bind(user.id, user.displayName, now, now)
     .run();
 
   return user;
@@ -471,16 +469,12 @@ async function recordBalanceChange(
 
 export async function GET() {
   const user = await getApiUser();
-  if (!user) return jsonError("로그인이 필요합니다.", 401);
-
   const market = await advanceMarket();
-  return NextResponse.json(await publicState(user.email, market));
+  return NextResponse.json(await publicState(user.id, market));
 }
 
 export async function POST(request: Request) {
   const user = await getApiUser();
-  if (!user) return jsonError("로그인이 필요합니다.", 401);
-
   let body: Record<string, unknown>;
   try {
     body = (await request.json()) as Record<string, unknown>;
@@ -490,7 +484,7 @@ export async function POST(request: Request) {
 
   const action = body.action;
   const now = Date.now();
-  const profile = await getProfile(user.email);
+  const profile = await getProfile(user.id);
   if (!profile) return jsonError("지갑을 불러오지 못했습니다.", 500);
 
   if (action === "earn") {
@@ -509,18 +503,18 @@ export async function POST(request: Request) {
              balance = balance + ?, last_earn_at = ?, updated_at = ?
            WHERE email = ?`,
         )
-        .bind(reward, now, now, user.email),
+        .bind(reward, now, now, user.id),
       db()
         .prepare(
           `INSERT INTO coin_transactions
             (user_email, type, amount, description, created_at)
            VALUES (?, 'earn', ?, '랜덤 코인 받기', ?)`,
         )
-        .bind(user.email, reward, now),
+        .bind(user.id, reward, now),
     ]);
     return NextResponse.json({
       reward,
-      state: await publicState(user.email),
+      state: await publicState(user.id),
     });
   }
 
@@ -538,18 +532,18 @@ export async function POST(request: Request) {
              balance = balance - ?, saved_luck = saved_luck + ?, updated_at = ?
            WHERE email = ?`,
         )
-        .bind(amount, amount, now, user.email),
+        .bind(amount, amount, now, user.id),
       db()
         .prepare(
           `INSERT INTO coin_transactions
             (user_email, type, amount, description, created_at)
            VALUES (?, 'save_luck', ?, '운 저장하기', ?)`,
         )
-        .bind(user.email, -amount, now),
+        .bind(user.id, -amount, now),
     ]);
     return NextResponse.json({
       saved: amount,
-      state: await publicState(user.email),
+      state: await publicState(user.id),
     });
   }
 
@@ -591,7 +585,7 @@ export async function POST(request: Request) {
       0,
     );
     await recordBalanceChange(
-      user.email,
+      user.id,
       netPrize - cost,
       "lotto",
       `로또 ${entries.length}게임`,
@@ -606,7 +600,7 @@ export async function POST(request: Request) {
         cost,
         netPrize,
       },
-      state: await publicState(user.email),
+      state: await publicState(user.id),
     });
   }
 
@@ -618,7 +612,7 @@ export async function POST(request: Request) {
     if (profile.balance < type) return jsonError("김밥 구매 코인이 부족합니다.");
     const ticket = generateScratchTicket(type);
     await recordBalanceChange(
-      user.email,
+      user.id,
       ticket.prize - type,
       "gimbap",
       `즉석김밥 ${type}`,
@@ -626,7 +620,7 @@ export async function POST(request: Request) {
     );
     return NextResponse.json({
       ticket,
-      state: await publicState(user.email),
+      state: await publicState(user.id),
     });
   }
 
@@ -673,7 +667,7 @@ export async function POST(request: Request) {
           .prepare(
             "UPDATE profiles SET balance = balance + ?, updated_at = ? WHERE email = ?",
           )
-          .bind(chosen.prize - 1_000, now, user.email),
+          .bind(chosen.prize - 1_000, now, user.id),
         db()
           .prepare(
             `INSERT INTO coin_transactions
@@ -681,7 +675,7 @@ export async function POST(request: Request) {
              VALUES (?, 'paper', ?, ?, ?)`,
           )
           .bind(
-            user.email,
+            user.id,
             chosen.prize - 1_000,
             `종이뽑기 ${chosen.rank}`,
             now,
@@ -697,7 +691,7 @@ export async function POST(request: Request) {
           ? { rank: chosen.rank, prize: chosen.prize }
           : null,
       boardReset: remaining === 0,
-      state: await publicState(user.email),
+      state: await publicState(user.id),
     });
   }
 
@@ -725,7 +719,7 @@ export async function POST(request: Request) {
         `SELECT symbol, quantity, average_price
          FROM holdings WHERE user_email = ? AND symbol = ?`,
       )
-      .bind(user.email, symbol)
+      .bind(user.id, symbol)
       .first<HoldingRow>();
     const held = currentHolding?.quantity ?? 0;
     const total = stock.price * quantity;
@@ -741,7 +735,7 @@ export async function POST(request: Request) {
           .prepare(
             "UPDATE profiles SET balance = balance - ?, updated_at = ? WHERE email = ?",
           )
-          .bind(total, now, user.email),
+          .bind(total, now, user.id),
         db()
           .prepare(
             `INSERT INTO holdings
@@ -752,14 +746,14 @@ export async function POST(request: Request) {
                average_price = excluded.average_price,
                updated_at = excluded.updated_at`,
           )
-          .bind(user.email, symbol, newQuantity, newAverage, now),
+          .bind(user.id, symbol, newQuantity, newAverage, now),
         db()
           .prepare(
             `INSERT INTO coin_transactions
               (user_email, type, amount, description, created_at)
              VALUES (?, 'stock_buy', ?, ?, ?)`,
           )
-          .bind(user.email, -total, `${stock.name} ${quantity}주 매수`, now),
+          .bind(user.id, -total, `${stock.name} ${quantity}주 매수`, now),
       ]);
     } else {
       if (held < quantity) return jsonError("보유 수량이 부족합니다.");
@@ -769,7 +763,7 @@ export async function POST(request: Request) {
           .prepare(
             "UPDATE profiles SET balance = balance + ?, updated_at = ? WHERE email = ?",
           )
-          .bind(total, now, user.email),
+          .bind(total, now, user.id),
         db()
           .prepare(
             `UPDATE holdings SET quantity = ?, average_price = ?, updated_at = ?
@@ -779,7 +773,7 @@ export async function POST(request: Request) {
             newQuantity,
             newQuantity ? currentHolding?.average_price ?? 0 : 0,
             now,
-            user.email,
+            user.id,
             symbol,
           ),
         db()
@@ -788,13 +782,13 @@ export async function POST(request: Request) {
               (user_email, type, amount, description, created_at)
              VALUES (?, 'stock_sell', ?, ?, ?)`,
           )
-          .bind(user.email, total, `${stock.name} ${quantity}주 매도`, now),
+          .bind(user.id, total, `${stock.name} ${quantity}주 매도`, now),
       ]);
     }
 
     return NextResponse.json({
       trade: { symbol, side, quantity, price: stock.price, total },
-      state: await publicState(user.email, market),
+      state: await publicState(user.id, market),
     });
   }
 

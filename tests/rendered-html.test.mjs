@@ -4,20 +4,26 @@ import test from "node:test";
 
 const projectRoot = new URL("../", import.meta.url);
 
-test("deployment build contains the protected page and game API", async () => {
-  const [page, api] = await Promise.all([
+test("deployment build contains the public guest page and game API", async () => {
+  const [page, api, publicUser] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/api/game/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/public-user.ts", import.meta.url), "utf8"),
   ]);
 
-  assert.match(page, /requireChatGPTUser\("\/"\)/);
+  assert.match(page, /<ArcadeClient \/>/);
+  assert.doesNotMatch(page, /requireChatGPTUser/);
   assert.match(page, /dynamic = "force-dynamic"/);
   assert.match(api, /export async function GET/);
   assert.match(api, /export async function POST/);
+  assert.match(api, /getPublicUser/);
   assert.match(api, /action === "earn"/);
   assert.match(api, /action === "save_luck"/);
   assert.match(api, /action === "paper_pick"/);
   assert.match(api, /action === "trade"/);
+  assert.match(publicUser, /luckyroom_session/);
+  assert.match(publicUser, /httpOnly: true/);
+  assert.match(publicUser, /sameSite: "lax"/);
 });
 
 test("economy UI, new games, and product metadata are present", async () => {
