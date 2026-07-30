@@ -1691,7 +1691,6 @@ export default function ArcadeClient() {
           실제 금융상품, 복권 구매 및 현금 가치와 무관합니다.
         </p>
         <div className="footer-links">
-          <a href="/signout-with-chatgpt?return_to=%2F">로그아웃</a>
           <a href="#top">맨 위로 ↑</a>
         </div>
       </footer>
