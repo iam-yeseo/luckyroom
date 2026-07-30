@@ -1544,7 +1544,7 @@ export default function ArcadeClient() {
                   <small>한 장 1,000 C</small>
                 </p>
               </div>
-              <div className="paper-board" aria-label="10열 16행 종이뽑기판">
+              <div className="paper-board" aria-label="160칸 종이뽑기판">
                 {PAPER_CELLS.map((cellId, index) => {
                   const available = paperAvailable.has(cellId);
                   const removing = paperRemovedId === cellId;
