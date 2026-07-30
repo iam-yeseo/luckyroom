@@ -1,24 +1,64 @@
 import type { Metadata, Viewport } from "next";
+import { headers } from "next/headers";
 import "./globals.css";
 
-export const metadata: Metadata = {
-  title: "운빨 실험실 | 오늘, 확률이 내 편일까?",
-  description:
-    "로또 6/45와 즉석김밥1000으로 오늘의 순수한 운을 시험하는 무료 확률 게임 아케이드입니다.",
-  applicationName: "운빨 실험실",
-  keywords: ["운빨 테스트", "로또 게임", "즉석복권", "확률 게임"],
-  openGraph: {
-    title: "운빨 실험실",
-    description: "오늘, 확률이 내 편일까? 두 가지 운빨 게임에 도전해보세요.",
-    locale: "ko_KR",
-    type: "website",
-  },
-  twitter: {
-    card: "summary",
-    title: "운빨 실험실",
-    description: "로또와 즉석김밥으로 시험하는 오늘의 순수한 운.",
-  },
-};
+const title = "운빨 실험실 | 코인으로 시험하는 오늘의 운";
+const description =
+  "100만 C로 시작해 로또, 즉석김밥, 종이뽑기판과 랜덤 주식 시장에서 오늘의 운을 시험하는 코인 아케이드입니다.";
+
+export async function generateMetadata(): Promise<Metadata> {
+  const requestHeaders = await headers();
+  const forwardedHost = requestHeaders.get("x-forwarded-host");
+  const requestHost = forwardedHost ?? requestHeaders.get("host");
+  const safeHost =
+    requestHost && /^[a-z0-9.-]+(?::\d+)?$/i.test(requestHost)
+      ? requestHost
+      : "localhost:3000";
+  const forwardedProtocol = requestHeaders.get("x-forwarded-proto");
+  const protocol =
+    forwardedProtocol === "http" || forwardedProtocol === "https"
+      ? forwardedProtocol
+      : safeHost.startsWith("localhost")
+        ? "http"
+        : "https";
+  const origin = `${protocol}://${safeHost}`;
+  const socialImage = new URL("/og.png", origin).toString();
+
+  return {
+    title,
+    description,
+    applicationName: "운빨 실험실",
+    keywords: [
+      "운빨 게임",
+      "코인 게임",
+      "로또 게임",
+      "즉석복권",
+      "종이뽑기",
+      "모의 주식",
+    ],
+    openGraph: {
+      title: "운빨 실험실",
+      description: "코인으로 시험하는 오늘의 운",
+      locale: "ko_KR",
+      type: "website",
+      url: origin,
+      images: [
+        {
+          url: socialImage,
+          width: 1733,
+          height: 908,
+          alt: "로또, 즉석김밥, 종이뽑기판과 주식 게임이 담긴 운빨 실험실",
+        },
+      ],
+    },
+    twitter: {
+      card: "summary_large_image",
+      title: "운빨 실험실",
+      description: "코인으로 시험하는 오늘의 운",
+      images: [socialImage],
+    },
+  };
+}
 
 export const viewport: Viewport = {
   themeColor: "#f4f1e8",

@@ -1,0 +1,1 @@
+CREATE INDEX `coin_transactions_user_idx` ON `coin_transactions` (`user_email`,`created_at`);

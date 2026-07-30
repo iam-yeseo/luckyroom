@@ -1,5 +1,20 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "entries": []
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1785379204495,
+      "tag": "0000_careful_karma",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1785379815315,
+      "tag": "0001_sharp_champions",
+      "breakpoints": true
+    }
+  ]
 }
