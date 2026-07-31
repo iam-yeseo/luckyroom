@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.pages.json",
+  "compilerOptions": {
+    "baseUrl": "../..",
+    "paths": {
+      "@/*": ["./*"]
+    }
+  },
+  "files": ["../../cloudflare-env.d.ts"]
+}
