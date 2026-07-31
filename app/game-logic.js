@@ -153,6 +153,22 @@ export const HORSE_NAMES = Object.freeze([
 
 export const HORSE_PAYOUT_RATES = Object.freeze([0.7, 0.2, 0.1]);
 
+export const RPS_MIN_BET = 1_000;
+export const RPS_MOVES = Object.freeze(["rock", "paper", "scissors"]);
+export const RPS_MATCH_TYPES = Object.freeze({
+  3: 2,
+  5: 3,
+  7: 5,
+});
+
+export const TIMING_GOD_MIN_BET = 1_000;
+export const TIMING_GOD_TARGET_HUNDREDTHS = Object.freeze([
+  300, 500, 777, 1_000, 1_001,
+]);
+export const TIMING_GOD_TARGETS = Object.freeze(
+  TIMING_GOD_TARGET_HUNDREDTHS.map((target) => target / 100),
+);
+
 /**
  * Returns an unbiased integer from 0 (inclusive) to max (exclusive).
  * Web Crypto is used when available, with a Math.random fallback.
@@ -205,6 +221,184 @@ export function drawUniqueNumbers(count, max) {
 
 export function createHorseRoster() {
   return shuffle(HORSE_NAMES).slice(0, 12);
+}
+
+/** @param {number} matchType */
+export function getRpsWinsRequired(matchType) {
+  const winsRequired = RPS_MATCH_TYPES[matchType];
+  if (!winsRequired) {
+    throw new RangeError("match type must be 3, 5, or 7");
+  }
+  return winsRequired;
+}
+
+/**
+ * Generates an integer AI stake within the player's inclusive ±25% range.
+ * @param {number} playerBet
+ * @param {(max: number) => number} randomIntFn
+ */
+export function createRpsAiBet(playerBet, randomIntFn = randomInt) {
+  if (!Number.isSafeInteger(playerBet) || playerBet < RPS_MIN_BET) {
+    throw new RangeError(`player bet must be at least ${RPS_MIN_BET}`);
+  }
+
+  const minimum = Math.ceil(playerBet * 0.75);
+  const maximum = Math.floor(playerBet * 1.25);
+  if (!Number.isSafeInteger(minimum) || !Number.isSafeInteger(maximum)) {
+    throw new RangeError("player bet is too large");
+  }
+
+  return minimum + randomIntFn(maximum - minimum + 1);
+}
+
+/** @param {(max: number) => number} randomIntFn */
+export function createRpsMove(randomIntFn = randomInt) {
+  return RPS_MOVES[randomIntFn(RPS_MOVES.length)];
+}
+
+/**
+ * @param {string} playerMove
+ * @param {string} aiMove
+ * @returns {"win" | "lose" | "draw"}
+ */
+export function evaluateRpsRound(playerMove, aiMove) {
+  if (!RPS_MOVES.includes(playerMove) || !RPS_MOVES.includes(aiMove)) {
+    throw new RangeError("invalid rock-paper-scissors move");
+  }
+  if (playerMove === aiMove) return "draw";
+
+  const winningMove = {
+    rock: "scissors",
+    paper: "rock",
+    scissors: "paper",
+  };
+  return winningMove[playerMove] === aiMove ? "win" : "lose";
+}
+
+/**
+ * Advances only the score and terminal state for a revealed RPS round.
+ * Draws leave both scores unchanged and are not decisive rounds.
+ * @param {number} playerWins
+ * @param {number} aiWins
+ * @param {"win" | "lose" | "draw"} result
+ * @param {number} winsRequired
+ */
+export function advanceRpsScore(
+  playerWins,
+  aiWins,
+  result,
+  winsRequired,
+) {
+  if (
+    !Number.isSafeInteger(playerWins) ||
+    playerWins < 0 ||
+    !Number.isSafeInteger(aiWins) ||
+    aiWins < 0
+  ) {
+    throw new RangeError("RPS scores must be non-negative safe integers");
+  }
+  if (!["win", "lose", "draw"].includes(result)) {
+    throw new RangeError("invalid RPS round result");
+  }
+  if (
+    !Number.isSafeInteger(winsRequired) ||
+    !Object.values(RPS_MATCH_TYPES).includes(winsRequired)
+  ) {
+    throw new RangeError("invalid RPS win target");
+  }
+  if (playerWins >= winsRequired || aiWins >= winsRequired) {
+    throw new RangeError("RPS match is already complete");
+  }
+
+  const nextPlayerWins = playerWins + (result === "win" ? 1 : 0);
+  const nextAiWins = aiWins + (result === "lose" ? 1 : 0);
+  const winner =
+    nextPlayerWins >= winsRequired
+      ? "player"
+      : nextAiWins >= winsRequired
+        ? "ai"
+        : null;
+
+  return {
+    playerWins: nextPlayerWins,
+    aiWins: nextAiWins,
+    decisiveRound: result !== "draw",
+    winner,
+    complete: winner !== null,
+  };
+}
+
+/** @param {number} target */
+export function getTimingTargetHundredths(target) {
+  if (!Number.isFinite(target)) {
+    throw new RangeError("timing target must be a finite number");
+  }
+  const hundredths = Math.round(target * 100);
+  if (
+    Math.abs(target * 100 - hundredths) > Number.EPSILON * 1_000 ||
+    !TIMING_GOD_TARGET_HUNDREDTHS.includes(hundredths)
+  ) {
+    throw new RangeError("unknown timing target");
+  }
+  return hundredths;
+}
+
+/** @param {number} failureCount */
+export function calculateTimingMultiplier(failureCount) {
+  if (!Number.isSafeInteger(failureCount) || failureCount < 0) {
+    throw new RangeError("failure count must be a non-negative safe integer");
+  }
+  const multiplierTenths = 11 + failureCount;
+  if (!Number.isSafeInteger(multiplierTenths)) {
+    throw new RangeError("timing multiplier is too large");
+  }
+  return multiplierTenths / 10;
+}
+
+/**
+ * @param {number} betAmount
+ * @param {number} failureCount
+ */
+export function calculateTimingPayout(betAmount, failureCount) {
+  if (
+    !Number.isSafeInteger(betAmount) ||
+    betAmount < TIMING_GOD_MIN_BET
+  ) {
+    throw new RangeError(`bet must be at least ${TIMING_GOD_MIN_BET}`);
+  }
+  if (!Number.isSafeInteger(failureCount) || failureCount < 0) {
+    throw new RangeError("failure count must be a non-negative safe integer");
+  }
+  const multiplierTenths = 11 + failureCount;
+  const payoutTenths = betAmount * multiplierTenths;
+  if (
+    !Number.isSafeInteger(multiplierTenths) ||
+    !Number.isSafeInteger(payoutTenths)
+  ) {
+    throw new RangeError("timing payout is too large");
+  }
+  return Math.floor(payoutTenths / 10);
+}
+
+/**
+ * Compares integer hundredths so floating-point formatting cannot change the
+ * result at the exact two-decimal boundary.
+ * @param {number} targetHundredths
+ * @param {number} elapsedHundredths
+ */
+export function evaluateTimingAttempt(
+  targetHundredths,
+  elapsedHundredths,
+) {
+  if (!TIMING_GOD_TARGET_HUNDREDTHS.includes(targetHundredths)) {
+    throw new RangeError("unknown timing target");
+  }
+  if (!Number.isSafeInteger(elapsedHundredths) || elapsedHundredths < 0) {
+    throw new RangeError(
+      "elapsed time must be a non-negative integer hundredth",
+    );
+  }
+  return elapsedHundredths === targetHundredths;
 }
 
 /**

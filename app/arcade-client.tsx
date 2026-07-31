@@ -15,8 +15,17 @@ import {
   randomInt,
 } from "./game-logic";
 
-type GameId = "lotto" | "gimbap" | "paper" | "stock" | "horse";
+type GameId =
+  | "lotto"
+  | "gimbap"
+  | "paper"
+  | "stock"
+  | "horse"
+  | "rps"
+  | "timing";
 type StockStatus = "active" | "suspended" | "delisted";
+type RpsMove = "rock" | "paper" | "scissors";
+type RpsRoundResult = "win" | "lose" | "draw";
 type HorseRacePhase =
   | "idle"
   | "select"
@@ -24,6 +33,7 @@ type HorseRacePhase =
   | "waiting"
   | "racing"
   | "result";
+type TimingPhase = "setup" | "running" | "stopped" | "result";
 
 type Profile = {
   email: string;
@@ -74,6 +84,12 @@ type GameState = {
   market: Stock[];
   paperBoard: PaperBoard;
   transactions: Transaction[];
+  rpsMatch: RpsMatch | null;
+  timing: {
+    failureStreak: number;
+    currentMultiplier: number;
+    activeGame: TimingGame | null;
+  };
   serverTime: number;
 };
 
@@ -140,6 +156,64 @@ type HorseRaceRound = {
   payout: number;
 };
 
+type RpsHistoryRound = {
+  turn: number;
+  playerMove: RpsMove;
+  aiMove: RpsMove;
+  result: RpsRoundResult;
+  playerWins: number;
+  aiWins: number;
+  decisiveRounds: number;
+};
+
+type RpsMatch = {
+  id: string;
+  matchType: 3 | 5 | 7;
+  winsRequired: 2 | 3 | 5;
+  playerBet: number;
+  aiBet: number;
+  playerWins: number;
+  aiWins: number;
+  decisiveRounds: number;
+  attempts: number;
+  nextTurn: number;
+  status: "active" | "completed";
+  winner: "player" | "ai" | null;
+  history: RpsHistoryRound[];
+  payout: number;
+  netProfit: number | null;
+  createdAt: number;
+  updatedAt: number;
+  completedAt: number | null;
+};
+
+type TimingGame = {
+  id: string;
+  target: number;
+  targetHundredths: number;
+  betAmount: number;
+  multiplier: number;
+  failureStreak: number;
+  startedAt: number;
+  status: "active";
+};
+
+type TimingResult = {
+  gameId: string;
+  target: number;
+  targetHundredths: number;
+  elapsedSeconds: number;
+  elapsedHundredths: number;
+  betAmount: number;
+  multiplier: number;
+  success: boolean;
+  payout: number;
+  netProfit: number;
+  previousFailureStreak: number;
+  failureStreak: number;
+  completedAt: number;
+};
+
 type ApiResponse = {
   state?: GameState;
   error?: string;
@@ -148,6 +222,12 @@ type ApiResponse = {
   ticket?: ScratchTicket;
   lotto?: LottoRound;
   race?: HorseRaceRound;
+  rpsMatch?: RpsMatch;
+  round?: RpsHistoryRound;
+  resumed?: boolean;
+  duplicate?: boolean;
+  timingGame?: TimingGame;
+  timingResult?: TimingResult;
   removedId?: string;
   result?: { rank: string; prize: number } | null;
   boardReset?: boolean;
@@ -171,7 +251,27 @@ const GAME_TABS: Array<{
   { id: "paper", index: "03", label: "종이뽑기판", short: "종이뽑기" },
   { id: "stock", index: "04", label: "주식 투자", short: "주식" },
   { id: "horse", index: "05", label: "행운 경마", short: "경마" },
+  { id: "rps", index: "06", label: "가위바위보", short: "가위" },
+  { id: "timing", index: "07", label: "타이밍의 신", short: "타이밍" },
 ];
+
+const RPS_MATCH_OPTIONS = [
+  { matchType: 3 as const, winsRequired: 2 as const, label: "3판 2선승" },
+  { matchType: 5 as const, winsRequired: 3 as const, label: "5판 3선승" },
+  { matchType: 7 as const, winsRequired: 5 as const, label: "7판 5선승" },
+];
+
+const RPS_MOVES: Array<{
+  id: RpsMove;
+  label: string;
+  icon: string;
+}> = [
+  { id: "scissors", label: "가위", icon: "✌️" },
+  { id: "rock", label: "바위", icon: "✊" },
+  { id: "paper", label: "보", icon: "✋" },
+];
+
+const TIMING_TARGETS = [3, 5, 7.77, 10, 10.01] as const;
 
 const LOTTO_NUMBERS = Array.from({ length: 45 }, (_, index) => index + 1);
 const PAPER_CELLS = Array.from(
@@ -285,6 +385,21 @@ function statusLabel(status: StockStatus) {
   return "거래중";
 }
 
+function rpsMoveMeta(move?: RpsMove) {
+  return RPS_MOVES.find((item) => item.id === move) ?? {
+    id: "rock" as const,
+    label: "선택 전",
+    icon: "?",
+  };
+}
+
+function formatStopwatch(hundredths: number) {
+  const safeHundredths = Math.max(0, Math.trunc(hundredths));
+  const seconds = Math.floor(safeHundredths / 100);
+  const fraction = safeHundredths % 100;
+  return `${String(seconds).padStart(2, "0")}.${String(fraction).padStart(2, "0")}`;
+}
+
 async function apiRequest(
   body?: Record<string, unknown>,
 ): Promise<ApiResponse | GameState> {
@@ -318,7 +433,7 @@ export default function ArcadeClient() {
   } | null>(null);
   const noticeTimerRef = useRef<number | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
-  const raceActiveRef = useRef(false);
+  const activeSessionRef = useRef(false);
 
   const showNotice = useCallback(
     (text: string, tone: "good" | "bad" | "plain" = "plain") => {
@@ -416,7 +531,7 @@ export default function ArcadeClient() {
 
   useEffect(() => {
     const timer = window.setInterval(() => {
-      if (!raceActiveRef.current) void loadState(true);
+      if (!activeSessionRef.current) void loadState(true);
     }, 5_000);
     return () => window.clearInterval(timer);
   }, [loadState]);
@@ -734,7 +849,7 @@ export default function ArcadeClient() {
   const pendingRaceStateRef = useRef<GameState | null>(null);
 
   const startHorseGame = () => {
-    if (raceActiveRef.current) return;
+    if (activeSessionRef.current) return;
     setHorseRoster(createHorseRoster());
     setSelectedHorse(null);
     setHorseBetAmount("");
@@ -768,7 +883,7 @@ export default function ArcadeClient() {
       return;
     }
 
-    raceActiveRef.current = true;
+    activeSessionRef.current = true;
     const response = await runAction("horse_race", {
       action: "horse_race",
       horses: horseRoster,
@@ -776,7 +891,7 @@ export default function ArcadeClient() {
       betAmount,
     });
     if (!response?.state || !response.race) {
-      raceActiveRef.current = false;
+      activeSessionRef.current = false;
       return;
     }
 
@@ -826,7 +941,7 @@ export default function ArcadeClient() {
       setGameState(pendingRaceStateRef.current);
       pendingRaceStateRef.current = null;
     }
-    raceActiveRef.current = false;
+    activeSessionRef.current = false;
     setHorseClaimed(true);
     if ((horseRace?.payout ?? 0) > 0) {
       showNotice(
@@ -836,6 +951,278 @@ export default function ArcadeClient() {
     } else {
       showNotice("경기가 종료됐습니다. 다음 경주에 다시 도전해보세요.");
     }
+  };
+
+  const [rpsMatchType, setRpsMatchType] = useState<3 | 5 | 7>(3);
+  const [rpsBetAmount, setRpsBetAmount] = useState("");
+  const [rpsMatch, setRpsMatch] = useState<RpsMatch | null>(null);
+  const [rpsRound, setRpsRound] = useState<RpsHistoryRound | null>(null);
+  const rpsPlayBusyRef = useRef(false);
+
+  useEffect(() => {
+    const activeMatch = gameState?.rpsMatch;
+    if (!activeMatch || activeMatch.status !== "active") return;
+    activeSessionRef.current = true;
+    const timer = window.setTimeout(() => {
+      setRpsMatch((current) =>
+        current?.id === activeMatch.id ? current : activeMatch,
+      );
+      setRpsMatchType(activeMatch.matchType);
+      setRpsBetAmount(String(activeMatch.playerBet));
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [gameState?.rpsMatch]);
+
+  const startRpsMatch = async () => {
+    if (activeSessionRef.current && rpsMatch?.status !== "active") {
+      showNotice("진행 중인 게임을 먼저 마무리해주세요.", "bad");
+      return;
+    }
+    const betAmount = Number(rpsBetAmount.replaceAll(",", ""));
+    if (
+      !Number.isSafeInteger(betAmount) ||
+      betAmount < 1_000 ||
+      betAmount > (gameState?.profile.balance ?? 0)
+    ) {
+      showNotice("1,000 C 이상, 보유 코인 안에서 배팅해주세요.", "bad");
+      return;
+    }
+
+    activeSessionRef.current = true;
+    const response = await runAction("rps_start", {
+      action: "rps_start",
+      matchType: rpsMatchType,
+      betAmount,
+    });
+    if (!response?.state || !response.rpsMatch) {
+      activeSessionRef.current = false;
+      return;
+    }
+
+    setGameState(response.state);
+    setRpsMatch(response.rpsMatch);
+    setRpsMatchType(response.rpsMatch.matchType);
+    setRpsBetAmount(String(response.rpsMatch.playerBet));
+    setRpsRound(response.rpsMatch.history.at(-1) ?? null);
+    playTone(response.resumed ? 420 : 610, 0.13);
+    showNotice(
+      response.resumed
+        ? "진행 중이던 AI 대결을 이어갑니다."
+        : `AI가 ${formatCoins(response.rpsMatch.aiBet)}을 배팅했습니다.`,
+      response.resumed ? "plain" : "good",
+    );
+  };
+
+  const playRpsMove = async (move: RpsMove) => {
+    if (
+      !rpsMatch ||
+      rpsMatch.status !== "active" ||
+      rpsPlayBusyRef.current
+    ) {
+      return;
+    }
+    rpsPlayBusyRef.current = true;
+    const response = await runAction("rps_play", {
+      action: "rps_play",
+      matchId: rpsMatch.id,
+      turn: rpsMatch.nextTurn,
+      move,
+    });
+    rpsPlayBusyRef.current = false;
+    if (!response?.state || !response.rpsMatch || !response.round) return;
+
+    setGameState(response.state);
+    setRpsMatch(response.rpsMatch);
+    setRpsRound(response.round);
+    const roundTone =
+      response.round.result === "win"
+        ? 780
+        : response.round.result === "lose"
+          ? 190
+          : 420;
+    playTone(roundTone, 0.14, 0.04);
+
+    if (response.rpsMatch.status === "completed") {
+      activeSessionRef.current = false;
+      const won = response.rpsMatch.winner === "player";
+      showNotice(
+        won
+          ? `최종 승리! AI 배팅금 ${formatCoins(response.rpsMatch.aiBet)}을 받았습니다.`
+          : `최종 패배. 배팅금 ${formatCoins(response.rpsMatch.playerBet)}이 소멸됐습니다.`,
+        won ? "good" : "bad",
+      );
+      return;
+    }
+
+    showNotice(
+      response.round.result === "win"
+        ? "이번 판 승리! 다음 AI 패가 정해졌습니다."
+        : response.round.result === "lose"
+          ? "이번 판 패배. 다음 패를 선택해주세요."
+          : "무승부! 승수 변화 없이 다시 겨룹니다.",
+      response.round.result === "win"
+        ? "good"
+        : response.round.result === "lose"
+          ? "bad"
+          : "plain",
+    );
+  };
+
+  const resetRpsMatch = () => {
+    if (rpsMatch?.status === "active") return;
+    setRpsMatch(null);
+    setRpsRound(null);
+    setRpsBetAmount("");
+  };
+
+  const [timingTarget, setTimingTarget] =
+    useState<(typeof TIMING_TARGETS)[number]>(3);
+  const [timingBetAmount, setTimingBetAmount] = useState("");
+  const [timingGame, setTimingGame] = useState<TimingGame | null>(null);
+  const [timingResult, setTimingResult] = useState<TimingResult | null>(null);
+  const [timingPhase, setTimingPhase] = useState<TimingPhase>("setup");
+  const [timingElapsedHundredths, setTimingElapsedHundredths] = useState(0);
+  const timingStartRef = useRef<number | null>(null);
+  const timingFrameRef = useRef<number | null>(null);
+  const timingStopBusyRef = useRef(false);
+
+  useEffect(() => {
+    const activeGame = gameState?.timing.activeGame;
+    if (!activeGame || timingGame?.id === activeGame.id) return;
+    const elapsedSinceServerStart = Math.max(
+      0,
+      Date.now() - activeGame.startedAt,
+    );
+    timingStartRef.current = performance.now() - elapsedSinceServerStart;
+    activeSessionRef.current = true;
+    const timer = window.setTimeout(() => {
+      setTimingGame(activeGame);
+      setTimingTarget(
+        activeGame.target as (typeof TIMING_TARGETS)[number],
+      );
+      setTimingBetAmount(String(activeGame.betAmount));
+      setTimingResult(null);
+      setTimingElapsedHundredths(Math.floor(elapsedSinceServerStart / 10));
+      setTimingPhase("running");
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [gameState?.timing.activeGame, timingGame?.id]);
+
+  useEffect(() => {
+    if (timingPhase !== "running" || !timingGame) return;
+
+    const updateClock = () => {
+      const startedAt = timingStartRef.current;
+      if (startedAt !== null) {
+        setTimingElapsedHundredths(
+          Math.max(0, Math.floor((performance.now() - startedAt) / 10)),
+        );
+      }
+      timingFrameRef.current = window.requestAnimationFrame(updateClock);
+    };
+
+    timingFrameRef.current = window.requestAnimationFrame(updateClock);
+    return () => {
+      if (timingFrameRef.current !== null) {
+        window.cancelAnimationFrame(timingFrameRef.current);
+        timingFrameRef.current = null;
+      }
+    };
+  }, [timingGame, timingPhase]);
+
+  const startTimingGame = async () => {
+    if (activeSessionRef.current) {
+      showNotice("진행 중인 게임을 먼저 마무리해주세요.", "bad");
+      return;
+    }
+    const betAmount = Number(timingBetAmount.replaceAll(",", ""));
+    if (
+      !Number.isSafeInteger(betAmount) ||
+      betAmount < 1_000 ||
+      betAmount > (gameState?.profile.balance ?? 0)
+    ) {
+      showNotice("1,000 C 이상, 보유 코인 안에서 배팅해주세요.", "bad");
+      return;
+    }
+
+    activeSessionRef.current = true;
+    const response = await runAction("timing_start", {
+      action: "timing_start",
+      target: timingTarget,
+      betAmount,
+    });
+    if (!response?.state || !response.timingGame) {
+      activeSessionRef.current = false;
+      return;
+    }
+
+    setGameState(response.state);
+    setTimingGame(response.timingGame);
+    setTimingTarget(
+      response.timingGame.target as (typeof TIMING_TARGETS)[number],
+    );
+    setTimingBetAmount(String(response.timingGame.betAmount));
+    setTimingResult(null);
+    setTimingElapsedHundredths(0);
+    timingStartRef.current = performance.now();
+    setTimingPhase("running");
+    playTone(640, 0.12, 0.035);
+  };
+
+  const settleTimingGame = async (elapsedHundredths: number) => {
+    if (!timingGame || timingStopBusyRef.current) return;
+    timingStopBusyRef.current = true;
+    const response = await runAction("timing_stop", {
+      action: "timing_stop",
+      gameId: timingGame.id,
+      elapsedHundredths,
+    });
+    timingStopBusyRef.current = false;
+    if (!response?.state || !response.timingResult) return;
+
+    setGameState(response.state);
+    setTimingResult(response.timingResult);
+    setTimingElapsedHundredths(response.timingResult.elapsedHundredths);
+    setTimingPhase("result");
+    activeSessionRef.current = false;
+    playTone(
+      response.timingResult.success ? 940 : 170,
+      0.18,
+      0.045,
+    );
+    showNotice(
+      response.timingResult.success
+        ? `${response.timingResult.multiplier.toFixed(1)}배 성공! ${formatCoins(response.timingResult.payout)}을 받았습니다.`
+        : `${formatStopwatch(response.timingResult.elapsedHundredths)}초에 멈췄습니다. 다음 배수가 올랐어요.`,
+      response.timingResult.success ? "good" : "bad",
+    );
+  };
+
+  const stopTimingGame = () => {
+    if (
+      timingPhase !== "running" ||
+      !timingGame ||
+      timingStopBusyRef.current
+    ) {
+      return;
+    }
+    const startedAt = timingStartRef.current;
+    if (startedAt === null) return;
+    const elapsedHundredths = Math.max(
+      0,
+      Math.floor((performance.now() - startedAt) / 10),
+    );
+    setTimingElapsedHundredths(elapsedHundredths);
+    setTimingPhase("stopped");
+    void settleTimingGame(elapsedHundredths);
+  };
+
+  const resetTimingGame = () => {
+    setTimingGame(null);
+    setTimingResult(null);
+    setTimingElapsedHundredths(0);
+    setTimingPhase("setup");
+    timingStartRef.current = null;
   };
 
   const currentHorsePool =
@@ -883,6 +1270,20 @@ export default function ArcadeClient() {
   const stockSecondsLeft = selectedStock
     ? Math.max(0, Math.ceil((selectedStock.updatedAt + 5_000 - now) / 1_000))
     : 5;
+  const rpsBetValue = Number(rpsBetAmount.replaceAll(",", "")) || 0;
+  const rpsAiBetLow = Math.ceil(rpsBetValue * 0.75);
+  const rpsAiBetHigh = Math.floor(rpsBetValue * 1.25);
+  const timingBetValue = Number(timingBetAmount.replaceAll(",", "")) || 0;
+  const timingMultiplier =
+    timingGame?.multiplier ??
+    gameState?.timing.currentMultiplier ??
+    1.1;
+  const timingPayoutPreview = Math.floor(
+    timingBetValue * timingMultiplier,
+  );
+  const timingDifference = timingResult
+    ? timingResult.elapsedHundredths - timingResult.targetHundredths
+    : 0;
 
   if (loading && !gameState) {
     return (
@@ -909,7 +1310,7 @@ export default function ArcadeClient() {
           </span>
         </a>
 
-        <nav className="game-tabs game-tabs--five" aria-label="게임 선택">
+        <nav className="game-tabs game-tabs--seven" aria-label="게임 선택">
           {GAME_TABS.map((tab) => (
             <button
               key={tab.id}
@@ -970,7 +1371,7 @@ export default function ArcadeClient() {
             <span>코인을 불려보세요.</span>
           </h1>
           <p className="intro-description">
-            다섯 가지 랜덤 게임과 실시간 모의 주식 시장.
+            일곱 가지 게임으로 시험하는 오늘의 운과 실시간 모의 주식 시장.
             <br />
             모든 코인은 게임 속 재화이며 실제 가치가 없습니다.
           </p>
@@ -2228,6 +2629,547 @@ export default function ArcadeClient() {
               </p>
             </details>
           )}
+        </div>
+
+        <div
+          id="rps-panel"
+          className={`game-panel ${activeGame === "rps" ? "is-active" : ""}`}
+          aria-hidden={activeGame !== "rps"}
+        >
+          <div className="panel-heading panel-heading--rps">
+            <div>
+              <p className="game-number">GAME 06 · AI HAND DUEL</p>
+              <h2>가위바위보</h2>
+              <p>
+                AI와 승부를 겨루고 최종 승리하면 AI가 건 코인을
+                가져갑니다.
+              </p>
+            </div>
+            <div className="rps-rule-chip">
+              <span>최소 배팅</span>
+              <strong>1,000 C</strong>
+              <small>AI 배팅 · 내 금액의 ±25%</small>
+            </div>
+          </div>
+
+          {!rpsMatch ? (
+            <div className="rps-setup-grid">
+              <section className="rps-format-card">
+                <p className="card-step">STEP 1 · MATCH TYPE</p>
+                <h3>승부 방식을 고르세요</h3>
+                <p>
+                  정해진 승수를 먼저 채우면 매치가 끝납니다. 무승부는
+                  승수에 포함되지 않습니다.
+                </p>
+                <div className="rps-format-options" aria-label="매치 방식">
+                  {RPS_MATCH_OPTIONS.map((option) => (
+                    <button
+                      type="button"
+                      key={option.matchType}
+                      className={`rps-format-option ${
+                        rpsMatchType === option.matchType ? "is-selected" : ""
+                      }`}
+                      aria-pressed={rpsMatchType === option.matchType}
+                      onClick={() => setRpsMatchType(option.matchType)}
+                    >
+                      <span>BEST OF {option.matchType}</span>
+                      <strong>{option.label}</strong>
+                      <small>{option.winsRequired}승 먼저 달성</small>
+                    </button>
+                  ))}
+                </div>
+              </section>
+
+              <aside className="rps-bet-card">
+                <p className="card-step">STEP 2 · COIN BET</p>
+                <h3>내 배팅금 정하기</h3>
+                <p>배팅과 동시에 AI도 자신의 금액을 확정합니다.</p>
+                <div className="rps-wallet">
+                  <span>사용 가능</span>
+                  <strong>{formatCoins(gameState?.profile.balance ?? 0)}</strong>
+                </div>
+                <label className="rps-bet-input">
+                  <span>배팅 금액</span>
+                  <div>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      value={rpsBetAmount}
+                      placeholder="최소 1,000"
+                      aria-label="가위바위보 배팅 금액"
+                      onChange={(event) =>
+                        setRpsBetAmount(
+                          event.target.value
+                            .replaceAll(",", "")
+                            .replace(/\D/g, "")
+                            .slice(0, 12),
+                        )
+                      }
+                    />
+                    <b>C</b>
+                  </div>
+                </label>
+                <div className="horse-bet-quick" aria-label="빠른 금액 선택">
+                  {[1_000, 5_000, 10_000, 50_000].map((amount) => (
+                    <button
+                      type="button"
+                      key={amount}
+                      disabled={amount > (gameState?.profile.balance ?? 0)}
+                      onClick={() => setRpsBetAmount(String(amount))}
+                    >
+                      {amount >= 10_000
+                        ? `${amount / 10_000}만`
+                        : `${amount / 1_000}천`}
+                    </button>
+                  ))}
+                </div>
+                <div className="rps-ai-preview">
+                  <span>AI 예상 배팅 범위</span>
+                  <strong>
+                    {rpsBetValue >= 1_000
+                      ? `${formatCoins(rpsAiBetLow)} ~ ${formatCoins(rpsAiBetHigh)}`
+                      : "금액 입력 후 공개"}
+                  </strong>
+                </div>
+                <button
+                  type="button"
+                  className="primary-button"
+                  onClick={startRpsMatch}
+                  disabled={
+                    busyAction === "rps_start" ||
+                    rpsBetValue < 1_000 ||
+                    rpsBetValue > (gameState?.profile.balance ?? 0)
+                  }
+                >
+                  {busyAction === "rps_start"
+                    ? "AI 배팅 중…"
+                    : "배팅 확정하고 대결 시작"}
+                </button>
+                {(gameState?.profile.balance ?? 0) < 1_000 && (
+                  <small>플레이하려면 최소 1,000 C가 필요합니다.</small>
+                )}
+              </aside>
+            </div>
+          ) : (
+            <section className="rps-arena" aria-live="polite">
+              <div className="rps-scoreboard">
+                <div>
+                  <span>PLAYER</span>
+                  <strong>{rpsMatch.playerWins}</strong>
+                  <small>{formatCoins(rpsMatch.playerBet)} 배팅</small>
+                </div>
+                <p>
+                  <span>
+                    {rpsMatch.matchType}판 · {rpsMatch.winsRequired}선승
+                  </span>
+                  <strong>:</strong>
+                  <small>
+                    결정 {rpsMatch.decisiveRounds}판 · 시도{" "}
+                    {rpsMatch.attempts}회
+                  </small>
+                </p>
+                <div>
+                  <span>AI</span>
+                  <strong>{rpsMatch.aiWins}</strong>
+                  <small>{formatCoins(rpsMatch.aiBet)} 배팅</small>
+                </div>
+              </div>
+
+              <div className="rps-duel">
+                <article className="rps-hand-card">
+                  <span>AI · 직전 패</span>
+                  <strong aria-hidden="true">
+                    {rpsRound ? rpsMoveMeta(rpsRound.aiMove).icon : "?"}
+                  </strong>
+                  <small>
+                    {rpsRound
+                      ? rpsMoveMeta(rpsRound.aiMove).label
+                      : "선택 완료 · 공개 전"}
+                  </small>
+                </article>
+                <div className="rps-vs" aria-hidden="true">
+                  VS
+                </div>
+                <article className="rps-hand-card">
+                  <span>PLAYER · 직전 패</span>
+                  <strong aria-hidden="true">
+                    {rpsRound ? rpsMoveMeta(rpsRound.playerMove).icon : "?"}
+                  </strong>
+                  <small>
+                    {rpsRound
+                      ? rpsMoveMeta(rpsRound.playerMove).label
+                      : "아래에서 패 선택"}
+                  </small>
+                </article>
+              </div>
+
+              {rpsRound && (
+                <p className={`rps-round-result is-${rpsRound.result}`}>
+                  {rpsRound.result === "win"
+                    ? "이번 판 승리"
+                    : rpsRound.result === "lose"
+                      ? "이번 판 패배"
+                      : "무승부 · 승수 변화 없음"}
+                </p>
+              )}
+
+              {rpsMatch.status === "active" ? (
+                <>
+                  <div className="rps-status-line">
+                    <span className="status-dot" aria-hidden="true" />
+                    AI의 다음 패는 이미 정해졌습니다 · 패를 선택하면 즉시 공개
+                  </div>
+                  <div className="rps-move-grid" aria-label="가위바위보 패 선택">
+                    {RPS_MOVES.map((move) => (
+                      <button
+                        type="button"
+                        key={move.id}
+                        disabled={busyAction === "rps_play"}
+                        onClick={() => void playRpsMove(move.id)}
+                      >
+                        <span aria-hidden="true">{move.icon}</span>
+                        <strong>{move.label}</strong>
+                      </button>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <div
+                  className={`rps-final ${
+                    rpsMatch.winner === "player" ? "is-win" : "is-loss"
+                  }`}
+                >
+                  <span>
+                    {rpsMatch.winner === "player"
+                      ? "MATCH WIN"
+                      : "MATCH LOSE"}
+                  </span>
+                  <h3>
+                    {rpsMatch.winner === "player"
+                      ? "AI 배팅금을 획득했습니다!"
+                      : "내 배팅금이 소멸됐습니다."}
+                  </h3>
+                  <strong>
+                    {rpsMatch.winner === "player" ? "+" : "−"}
+                    {formatCoins(
+                      rpsMatch.winner === "player"
+                        ? rpsMatch.aiBet
+                        : rpsMatch.playerBet,
+                    )}
+                  </strong>
+                  <button
+                    type="button"
+                    className="rps-again-button"
+                    onClick={resetRpsMatch}
+                  >
+                    새 매치 준비
+                  </button>
+                </div>
+              )}
+
+              {rpsMatch.history.length > 0 && (
+                <div className="rps-history" aria-label="라운드 기록">
+                  {rpsMatch.history.slice(-8).map((round) => (
+                    <span
+                      key={round.turn}
+                      className={`is-${round.result}`}
+                      title={`${rpsMoveMeta(round.playerMove).label} vs ${rpsMoveMeta(round.aiMove).label}`}
+                    >
+                      {round.turn}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </section>
+          )}
+
+          <details className="rule-note rps-rule-note">
+            <summary>
+              <span>가위바위보 배팅과 승부 규칙</span>
+              <i>+</i>
+            </summary>
+            <p>
+              내 배팅금은 매치 시작 시 지갑에서 빠집니다. AI는 그 금액의
+              75~125%를 무작위로 걸고, 최종 승리하면 내 원금과 AI 배팅금을
+              돌려받습니다. 패배하면 내 배팅금은 소멸됩니다. 7판 5선승은
+              5승을 먼저 채울 때까지 진행하며 무승부는 판수와 승수에
+              포함하지 않습니다.
+            </p>
+          </details>
+        </div>
+
+        <div
+          id="timing-panel"
+          className={`game-panel ${activeGame === "timing" ? "is-active" : ""}`}
+          aria-hidden={activeGame !== "timing"}
+        >
+          <div className="panel-heading panel-heading--timing">
+            <div>
+              <p className="game-number">GAME 07 · STOP AT THE MOMENT</p>
+              <h2>타이밍의 신</h2>
+              <p>
+                목표 시간과 소수점 둘째 자리까지 정확히 일치하는 순간에
+                버튼을 누르세요.
+              </p>
+            </div>
+            <div className="timing-rule-chip">
+              <span>현재 도전 배수</span>
+              <strong>
+                {(gameState?.timing.currentMultiplier ?? 1.1).toFixed(1)}×
+              </strong>
+              <small>
+                연속 실패 {gameState?.timing.failureStreak ?? 0}회
+              </small>
+            </div>
+          </div>
+
+          {timingPhase === "setup" ? (
+            <div className="timing-layout">
+              <section className="timing-setup-card">
+                <p className="card-step">STEP 1 · TARGET</p>
+                <h3>목표 시간을 설정하세요</h3>
+                <div className="timing-target-grid" aria-label="목표 시간">
+                  {TIMING_TARGETS.map((target) => (
+                    <button
+                      type="button"
+                      key={target}
+                      className={`timing-target-button ${
+                        timingTarget === target ? "is-selected" : ""
+                      }`}
+                      aria-pressed={timingTarget === target}
+                      onClick={() => setTimingTarget(target)}
+                    >
+                      {target.toFixed(2)}
+                      <small>SEC</small>
+                    </button>
+                  ))}
+                </div>
+
+                <label className="timing-bet-input">
+                  <span>배팅 금액 · 최소 1,000 C</span>
+                  <div>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      value={timingBetAmount}
+                      placeholder="최소 1,000"
+                      aria-label="타이밍 게임 배팅 금액"
+                      onChange={(event) =>
+                        setTimingBetAmount(
+                          event.target.value
+                            .replaceAll(",", "")
+                            .replace(/\D/g, "")
+                            .slice(0, 12),
+                        )
+                      }
+                    />
+                    <b>C</b>
+                  </div>
+                </label>
+                <div className="horse-bet-quick" aria-label="빠른 금액 선택">
+                  {[1_000, 5_000, 10_000, 50_000].map((amount) => (
+                    <button
+                      type="button"
+                      key={amount}
+                      disabled={amount > (gameState?.profile.balance ?? 0)}
+                      onClick={() => setTimingBetAmount(String(amount))}
+                    >
+                      {amount >= 10_000
+                        ? `${amount / 10_000}만`
+                        : `${amount / 1_000}천`}
+                    </button>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  className="primary-button"
+                  onClick={startTimingGame}
+                  disabled={
+                    busyAction === "timing_start" ||
+                    timingBetValue < 1_000 ||
+                    timingBetValue > (gameState?.profile.balance ?? 0)
+                  }
+                >
+                  {busyAction === "timing_start"
+                    ? "스톱워치 준비 중…"
+                    : "배팅하고 게임 시작"}
+                </button>
+                {(gameState?.profile.balance ?? 0) < 1_000 && (
+                  <small>플레이하려면 최소 1,000 C가 필요합니다.</small>
+                )}
+              </section>
+
+              <aside className="timing-multiplier-card">
+                <p className="card-step">PAYOUT MULTIPLIER</p>
+                <span>이번 도전</span>
+                <strong>{timingMultiplier.toFixed(1)}×</strong>
+                <dl>
+                  <div>
+                    <dt>연속 실패</dt>
+                    <dd>{gameState?.timing.failureStreak ?? 0}회</dd>
+                  </div>
+                  <div>
+                    <dt>성공 시 총 지급</dt>
+                    <dd>
+                      {timingBetValue >= 1_000
+                        ? formatCoins(timingPayoutPreview)
+                        : "—"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>성공 시 순이익</dt>
+                    <dd>
+                      {timingBetValue >= 1_000
+                        ? `+${formatCoins(timingPayoutPreview - timingBetValue)}`
+                        : "—"}
+                    </dd>
+                  </div>
+                </dl>
+                <p>
+                  실패할 때마다 다음 배수가 0.1배 오르고, 성공하면
+                  1.1배로 초기화됩니다.
+                </p>
+              </aside>
+            </div>
+          ) : (
+            <section
+              className={`timing-arena ${
+                timingResult?.success ? "is-success" : ""
+              }`}
+              aria-live="polite"
+            >
+              <div className="timing-status">
+                <span
+                  className={timingPhase === "running" ? "is-live" : ""}
+                >
+                  {timingPhase === "running"
+                    ? "LIVE"
+                    : timingPhase === "stopped"
+                      ? "CHECK"
+                      : timingResult?.success
+                        ? "PERFECT"
+                        : "MISS"}
+                </span>
+                <p>
+                  {timingPhase === "running"
+                    ? "지금 흐르는 시간을 보고 정확한 순간에 멈추세요."
+                    : timingPhase === "stopped"
+                      ? "클릭한 순간을 정산하고 있습니다."
+                      : timingResult?.success
+                        ? "소수점 둘째 자리까지 정확히 일치했습니다!"
+                        : "목표 시간과 일치하지 않았습니다."}
+                </p>
+              </div>
+
+              <div
+                className={`timing-clock ${
+                  timingPhase === "running" ? "is-running" : ""
+                }`}
+                aria-label={`현재 ${formatStopwatch(timingElapsedHundredths)}초`}
+              >
+                <span>{formatStopwatch(timingElapsedHundredths)}</span>
+                <small>SECONDS</small>
+              </div>
+
+              <div className="timing-target-line">
+                <span>목표 시간</span>
+                <strong>{timingGame?.target.toFixed(2)}초</strong>
+                <i aria-hidden="true">◎</i>
+                <span>도전 배수</span>
+                <strong>{timingGame?.multiplier.toFixed(1)}배</strong>
+              </div>
+
+              {timingPhase !== "result" ? (
+                <button
+                  type="button"
+                  className="timing-stop-button"
+                  onClick={
+                    timingPhase === "running"
+                      ? stopTimingGame
+                      : () =>
+                          void settleTimingGame(timingElapsedHundredths)
+                  }
+                  disabled={busyAction === "timing_stop"}
+                >
+                  {timingPhase === "running"
+                    ? "지금 멈추기"
+                    : busyAction === "timing_stop"
+                      ? "결과 확인 중…"
+                      : "정산 다시 시도"}
+                </button>
+              ) : (
+                timingResult && (
+                  <div
+                    className={`timing-result ${
+                      timingResult.success ? "is-success" : "is-failure"
+                    }`}
+                  >
+                    <div className="timing-difference">
+                      <span>목표와의 차이</span>
+                      <strong>
+                        {timingDifference > 0 ? "+" : ""}
+                        {(timingDifference / 100).toFixed(2)}초
+                      </strong>
+                    </div>
+                    <dl>
+                      <div>
+                        <dt>최종 기록</dt>
+                        <dd>
+                          {formatStopwatch(timingResult.elapsedHundredths)}초
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>
+                          {timingResult.success ? "총 지급액" : "소멸 배팅금"}
+                        </dt>
+                        <dd>
+                          {formatCoins(
+                            timingResult.success
+                              ? timingResult.payout
+                              : timingResult.betAmount,
+                          )}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>다음 배수</dt>
+                        <dd>
+                          {(
+                            gameState?.timing.currentMultiplier ?? 1.1
+                          ).toFixed(1)}
+                          배
+                        </dd>
+                      </div>
+                    </dl>
+                    <p>
+                      {timingResult.success
+                        ? "성공으로 연속 실패 기록과 배수가 초기화됐습니다."
+                        : `연속 실패 ${timingResult.failureStreak}회 · 다음 성공 보상이 더 커집니다.`}
+                    </p>
+                    <button
+                      type="button"
+                      className="timing-again-button"
+                      onClick={resetTimingGame}
+                    >
+                      다시 도전하기
+                    </button>
+                  </div>
+                )
+              )}
+            </section>
+          )}
+
+          <details className="rule-note timing-rule-note">
+            <summary>
+              <span>타이밍 판정과 배수 규칙</span>
+              <i>+</i>
+            </summary>
+            <p>
+              게임 시작 후 흐르는 스톱워치를 0.01초 단위로 판정합니다. 목표
+              숫자와 표시된 기록이 완전히 같아야 성공입니다. 배팅금은 시작할
+              때 차감되고, 성공하면 해당 배수만큼 총 지급됩니다. 실패 횟수가
+              10회면 배수는 2.1배이며 성공 즉시 1.1배로 돌아갑니다.
+            </p>
+          </details>
         </div>
       </section>
 

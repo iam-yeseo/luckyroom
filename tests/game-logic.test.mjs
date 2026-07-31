@@ -6,21 +6,36 @@ import {
   HORSE_PAYOUT_RATES,
   LOTTO_BASE_PRIZES,
   PAPER_PRIZES,
+  RPS_MATCH_TYPES,
+  RPS_MIN_BET,
+  RPS_MOVES,
   SPETTO_PRIZE_TABLE,
   SPETTO_TOTAL_TICKETS,
   STOCK_PRODUCTS,
   SCRATCH_TYPES,
+  TIMING_GOD_MIN_BET,
+  TIMING_GOD_TARGET_HUNDREDTHS,
+  TIMING_GOD_TARGETS,
+  advanceRpsScore,
   applyStockChange,
   calculateLottoPayout,
   calculateOtherIncomeTax,
+  calculateTimingMultiplier,
+  calculateTimingPayout,
   createHorseRace,
   createHorseRoster,
   createLottoRoundPrizes,
   createPaperBoard,
+  createRpsAiBet,
+  createRpsMove,
   derivativeRate,
   drawUniqueNumbers,
   evaluateLotto,
+  evaluateRpsRound,
+  evaluateTimingAttempt,
   generateScratchTicket,
+  getRpsWinsRequired,
+  getTimingTargetHundredths,
 } from "../app/game-logic.js";
 
 test("drawUniqueNumbers draws unique in-range values", () => {
@@ -205,4 +220,188 @@ test("horse derby draws twelve unique names and settles the full payout flow", (
       assert.equal(race.payout, 0);
     }
   }
+});
+
+test("rock-paper-scissors preserves every requested match type and move", () => {
+  assert.equal(RPS_MIN_BET, 1_000);
+  assert.deepEqual(RPS_MOVES, ["rock", "paper", "scissors"]);
+  assert.deepEqual(
+    Object.entries(RPS_MATCH_TYPES).map(([matchType, winsRequired]) => [
+      Number(matchType),
+      winsRequired,
+    ]),
+    [
+      [3, 2],
+      [5, 3],
+      [7, 5],
+    ],
+  );
+  assert.equal(getRpsWinsRequired(3), 2);
+  assert.equal(getRpsWinsRequired(5), 3);
+  assert.equal(getRpsWinsRequired(7), 5);
+  assert.throws(() => getRpsWinsRequired(1), RangeError);
+  assert.throws(() => getRpsWinsRequired(9), RangeError);
+
+  assert.equal(createRpsMove(() => 0), "rock");
+  assert.equal(createRpsMove(() => 1), "paper");
+  assert.equal(createRpsMove(() => 2), "scissors");
+});
+
+test("rock-paper-scissors evaluator covers wins, losses, and draws", () => {
+  const outcomes = [
+    ["rock", "rock", "draw"],
+    ["rock", "paper", "lose"],
+    ["rock", "scissors", "win"],
+    ["paper", "rock", "win"],
+    ["paper", "paper", "draw"],
+    ["paper", "scissors", "lose"],
+    ["scissors", "rock", "lose"],
+    ["scissors", "paper", "win"],
+    ["scissors", "scissors", "draw"],
+  ];
+
+  for (const [playerMove, aiMove, result] of outcomes) {
+    assert.equal(evaluateRpsRound(playerMove, aiMove), result);
+  }
+
+  assert.throws(() => evaluateRpsRound("invalid", "rock"), RangeError);
+  assert.throws(() => evaluateRpsRound("rock", "invalid"), RangeError);
+});
+
+test("rock-paper-scissors score advances only to the configured win target", () => {
+  assert.deepEqual(advanceRpsScore(0, 0, "draw", 2), {
+    playerWins: 0,
+    aiWins: 0,
+    decisiveRound: false,
+    winner: null,
+    complete: false,
+  });
+
+  assert.deepEqual(advanceRpsScore(1, 0, "win", 2), {
+    playerWins: 2,
+    aiWins: 0,
+    decisiveRound: true,
+    winner: "player",
+    complete: true,
+  });
+  assert.deepEqual(advanceRpsScore(0, 1, "lose", 2), {
+    playerWins: 0,
+    aiWins: 2,
+    decisiveRound: true,
+    winner: "ai",
+    complete: true,
+  });
+
+  assert.deepEqual(advanceRpsScore(2, 2, "win", 3), {
+    playerWins: 3,
+    aiWins: 2,
+    decisiveRound: true,
+    winner: "player",
+    complete: true,
+  });
+  assert.deepEqual(advanceRpsScore(2, 2, "lose", 3), {
+    playerWins: 2,
+    aiWins: 3,
+    decisiveRound: true,
+    winner: "ai",
+    complete: true,
+  });
+
+  const seventhDecisiveRound = advanceRpsScore(3, 3, "win", 5);
+  assert.deepEqual(seventhDecisiveRound, {
+    playerWins: 4,
+    aiWins: 3,
+    decisiveRound: true,
+    winner: null,
+    complete: false,
+  });
+  assert.deepEqual(
+    advanceRpsScore(
+      seventhDecisiveRound.playerWins,
+      seventhDecisiveRound.aiWins,
+      "win",
+      5,
+    ),
+    {
+      playerWins: 5,
+      aiWins: 3,
+      decisiveRound: true,
+      winner: "player",
+      complete: true,
+    },
+  );
+
+  assert.throws(() => advanceRpsScore(-1, 0, "win", 2), RangeError);
+  assert.throws(() => advanceRpsScore(0.5, 0, "win", 2), RangeError);
+  assert.throws(() => advanceRpsScore(0, 0, "invalid", 2), RangeError);
+  assert.throws(() => advanceRpsScore(0, 0, "win", 4), RangeError);
+  assert.throws(() => advanceRpsScore(2, 0, "draw", 2), RangeError);
+  assert.throws(() => advanceRpsScore(0, 3, "win", 3), RangeError);
+});
+
+test("AI stake uses the inclusive integer plus-or-minus twenty-five-percent range", () => {
+  let requestedBuckets = 0;
+  assert.equal(
+    createRpsAiBet(1_000, (bucketCount) => {
+      requestedBuckets = bucketCount;
+      return 0;
+    }),
+    750,
+  );
+  assert.equal(requestedBuckets, 501);
+  assert.equal(
+    createRpsAiBet(1_000, (bucketCount) => bucketCount - 1),
+    1_250,
+  );
+  assert.equal(createRpsAiBet(1_001, () => 0), 751);
+  assert.equal(
+    createRpsAiBet(1_001, (bucketCount) => bucketCount - 1),
+    1_251,
+  );
+
+  assert.throws(() => createRpsAiBet(999, () => 0), RangeError);
+  assert.throws(() => createRpsAiBet(1_000.5, () => 0), RangeError);
+  assert.throws(
+    () => createRpsAiBet(Number.MAX_SAFE_INTEGER, () => 0),
+    RangeError,
+  );
+});
+
+test("Timing God compares the five targets as exact integer hundredths", () => {
+  assert.equal(TIMING_GOD_MIN_BET, 1_000);
+  assert.deepEqual(TIMING_GOD_TARGET_HUNDREDTHS, [
+    300, 500, 777, 1_000, 1_001,
+  ]);
+  assert.deepEqual(TIMING_GOD_TARGETS, [3, 5, 7.77, 10, 10.01]);
+
+  for (const [target, hundredths] of TIMING_GOD_TARGETS.map(
+    (target, index) => [target, TIMING_GOD_TARGET_HUNDREDTHS[index]],
+  )) {
+    assert.equal(getTimingTargetHundredths(target), hundredths);
+    assert.equal(evaluateTimingAttempt(hundredths, hundredths), true);
+    assert.equal(evaluateTimingAttempt(hundredths, hundredths - 1), false);
+    assert.equal(evaluateTimingAttempt(hundredths, hundredths + 1), false);
+  }
+
+  assert.throws(() => getTimingTargetHundredths(7.78), RangeError);
+  assert.throws(() => getTimingTargetHundredths(Number.NaN), RangeError);
+  assert.throws(() => evaluateTimingAttempt(778, 778), RangeError);
+  assert.throws(() => evaluateTimingAttempt(1_000, -1), RangeError);
+  assert.throws(() => evaluateTimingAttempt(1_000, 1_000.5), RangeError);
+});
+
+test("Timing God multiplier grows by 0.1 per failure and resets through settlement", () => {
+  assert.equal(calculateTimingMultiplier(0), 1.1);
+  assert.equal(calculateTimingMultiplier(1), 1.2);
+  assert.equal(calculateTimingMultiplier(10), 2.1);
+  assert.equal(calculateTimingPayout(1_000, 0), 1_100);
+  assert.equal(calculateTimingPayout(1_000, 1), 1_200);
+  assert.equal(calculateTimingPayout(1_000, 10), 2_100);
+  assert.equal(calculateTimingPayout(1_001, 0), 1_101);
+
+  assert.throws(() => calculateTimingMultiplier(-1), RangeError);
+  assert.throws(() => calculateTimingMultiplier(0.5), RangeError);
+  assert.throws(() => calculateTimingPayout(999, 0), RangeError);
+  assert.throws(() => calculateTimingPayout(1_000.5, 0), RangeError);
+  assert.throws(() => calculateTimingPayout(1_000, -1), RangeError);
 });

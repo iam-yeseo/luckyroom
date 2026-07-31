@@ -21,18 +21,49 @@ test("deployment build contains the public guest page and game API", async () =>
   assert.match(api, /action === "save_luck"/);
   assert.match(api, /action === "paper_pick"/);
   assert.match(api, /action === "horse_race"/);
+  assert.match(api, /action === "rps_start"/);
+  assert.match(api, /action === "rps_play"/);
+  assert.match(api, /action === "timing_start"/);
+  assert.match(api, /action === "timing_stop"/);
   assert.match(api, /action === "trade"/);
+  assert.match(api, /CREATE TABLE IF NOT EXISTS rps_matches/);
+  assert.match(api, /CREATE TABLE IF NOT EXISTS timing_stats/);
+  assert.match(api, /CREATE TABLE IF NOT EXISTS timing_games/);
+  assert.match(api, /CREATE TABLE IF NOT EXISTS game_action_receipts/);
+  assert.match(api, /evaluateRpsRound/);
+  assert.match(api, /advanceRpsScore/);
+  assert.match(api, /evaluateTimingAttempt/);
+  assert.match(api, /calculateTimingPayout/);
+  assert.match(api, /const aiMove = match\.ai_move/);
+  assert.match(api, /const nextAiMove = winner \? "" : createRpsMove\(\)/);
+  assert.match(
+    api,
+    /winner === "player" \? match\.player_bet \+ match\.ai_bet : 0/,
+  );
+  assert.match(
+    api,
+    /const failureStreak = success \? 0 : timingGame\.failure_count \+ 1/,
+  );
+  assert.match(api, /status = 'active'/);
+  assert.match(api, /duplicate: true/);
+
+  const publicRpsMatch = api.match(
+    /function publicRpsMatch\(row: RpsMatchRow\) \{[\s\S]*?\n\}/,
+  )?.[0];
+  assert.ok(publicRpsMatch);
+  assert.doesNotMatch(publicRpsMatch, /aiMove|ai_move/);
   assert.match(publicUser, /luckyroom_session/);
   assert.match(publicUser, /httpOnly: true/);
   assert.match(publicUser, /sameSite: "lax"/);
 });
 
-test("economy UI, new games, and product metadata are present", async () => {
-  const [page, layout, css, packageJson] = await Promise.all([
+test("economy UI, seven games, and product metadata are present", async () => {
+  const [page, layout, css, packageJson, readme] = await Promise.all([
     readFile(new URL("../app/arcade-client.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
+    readFile(new URL("../README.md", import.meta.url), "utf8"),
   ]);
 
   assert.match(page, /"use client"/);
@@ -41,6 +72,18 @@ test("economy UI, new games, and product metadata are present", async () => {
   assert.match(page, /추억의 종이뽑기판/);
   assert.match(page, /주식 투자하기/);
   assert.match(page, /행운 경마장/);
+  assert.match(page, /가위바위보/);
+  assert.match(page, /타이밍의 신/);
+  assert.match(page, /id="rps-panel"/);
+  assert.match(page, /id="timing-panel"/);
+  assert.match(page, /3판 2선승/);
+  assert.match(page, /5판 3선승/);
+  assert.match(page, /7판 5선승/);
+  assert.match(page, /const TIMING_TARGETS = \[3, 5, 7\.77, 10, 10\.01\]/);
+  assert.match(page, /performance\.now\(\)/);
+  assert.match(page, /requestAnimationFrame/);
+  assert.match(page, /Math\.floor\(\(performance\.now\(\) - startedAt\) \/ 10\)/);
+  assert.match(page, /AI의 다음 패는 이미 정해졌습니다/);
   assert.match(page, /전체 자동 선택/);
   assert.match(page, /전체 초기화/);
   assert.match(page, /market-clock__progress/);
@@ -49,16 +92,30 @@ test("economy UI, new games, and product metadata are present", async () => {
   assert.match(page, /aria-pressed|aria-live/);
   assert.match(layout, /const title = "운빨 실험실/);
   assert.match(layout, /summary_large_image/);
-  assert.match(layout, /\/og\.png/);
+  assert.match(layout, /\/og-seven-games\.png/);
   assert.match(layout, /<html lang="ko">/);
+  assert.match(layout, /AI 가위바위보/);
+  assert.match(layout, /타이밍 게임/);
   assert.match(css, /\.number-grid/);
   assert.match(css, /\.paper-board/);
   assert.match(css, /\.stock-table/);
   assert.match(css, /\.horse-track/);
+  assert.match(css, /\.rps-arena/);
+  assert.match(css, /\.rps-move-grid/);
+  assert.match(css, /\.timing-clock/);
+  assert.match(css, /\.timing-stop-button/);
   assert.match(css, /\.paper-result-modal/);
   assert.match(css, /\.luck-modal/);
   assert.match(css, /@media \(max-width: 640px\)/);
   assert.match(css, /prefers-reduced-motion: reduce/);
+  assert.match(readme, /일곱 가지 게임/);
+  assert.match(readme, /AI 가위바위보/);
+  assert.match(readme, /3판 2선승/);
+  assert.match(readme, /5판 3선승/);
+  assert.match(readme, /7판 5선승/);
+  assert.match(readme, /타이밍의 신/);
+  assert.match(readme, /3\.00·5\.00·7\.77·10\.00·10\.01초/);
+  assert.doesNotMatch(readme, /다섯 가지 랜덤 게임/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
 
   await assert.rejects(access(new URL("../app/_sites-preview/SkeletonPreview.tsx", import.meta.url)));
