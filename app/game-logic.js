@@ -257,6 +257,41 @@ export function createRpsMove(randomIntFn = randomInt) {
 }
 
 /**
+ * Builds a cyclic three-lamp reveal that slows down and lands on the
+ * predetermined AI move without visually jumping over a lamp.
+ * @param {number} startIndex
+ * @param {number} targetIndex
+ * @param {boolean} reducedMotion
+ */
+export function createRpsRevealSteps(
+  startIndex,
+  targetIndex,
+  reducedMotion = false,
+) {
+  for (const index of [startIndex, targetIndex]) {
+    if (!Number.isSafeInteger(index) || index < 0 || index > 2) {
+      throw new RangeError("RPS lamp indexes must be between zero and two");
+    }
+  }
+  if (reducedMotion) {
+    return [{ index: targetIndex, delay: 180 }];
+  }
+
+  const minimumSteps = 10;
+  const stepCount =
+    minimumSteps +
+    ((targetIndex - ((startIndex + minimumSteps) % 3) + 3) % 3);
+
+  return Array.from({ length: stepCount }, (_, index) => {
+    const ratio = stepCount === 1 ? 1 : index / (stepCount - 1);
+    return {
+      index: (startIndex + index + 1) % 3,
+      delay: 70 + Math.round(ratio * ratio * 260),
+    };
+  });
+}
+
+/**
  * @param {string} playerMove
  * @param {string} aiMove
  * @returns {"win" | "lose" | "draw"}

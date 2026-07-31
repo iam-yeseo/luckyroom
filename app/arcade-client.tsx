@@ -10,6 +10,7 @@ import {
 import {
   SCRATCH_TYPES,
   createHorseRoster,
+  createRpsRevealSteps,
   drawUniqueNumbers,
   formatCoins,
   randomInt,
@@ -26,6 +27,7 @@ type GameId =
 type StockStatus = "active" | "suspended" | "delisted";
 type RpsMove = "rock" | "paper" | "scissors";
 type RpsRoundResult = "win" | "lose" | "draw";
+type RpsRevealPhase = "choosing" | "spinning" | "slowing" | "revealed";
 type HorseRacePhase =
   | "idle"
   | "select"
@@ -33,7 +35,7 @@ type HorseRacePhase =
   | "waiting"
   | "racing"
   | "result";
-type TimingPhase = "setup" | "running" | "stopped" | "result";
+type TimingPhase = "setup" | "countdown" | "running" | "stopped" | "result";
 
 type Profile = {
   email: string;
@@ -957,7 +959,57 @@ export default function ArcadeClient() {
   const [rpsBetAmount, setRpsBetAmount] = useState("");
   const [rpsMatch, setRpsMatch] = useState<RpsMatch | null>(null);
   const [rpsRound, setRpsRound] = useState<RpsHistoryRound | null>(null);
+  const [rpsRevealPhase, setRpsRevealPhase] =
+    useState<RpsRevealPhase>("choosing");
+  const [rpsLampMove, setRpsLampMove] =
+    useState<RpsMove>(RPS_MOVES[0].id);
+  const [rpsPlayerChoice, setRpsPlayerChoice] = useState<RpsMove | null>(
+    null,
+  );
   const rpsPlayBusyRef = useRef(false);
+  const rpsLampIndexRef = useRef(0);
+  const rpsRevealTimersRef = useRef<number[]>([]);
+  const rpsRevealTokenRef = useRef(0);
+
+  const setActiveRpsLamp = useCallback((move: RpsMove) => {
+    rpsLampIndexRef.current = RPS_MOVES.findIndex((item) => item.id === move);
+    setRpsLampMove(move);
+  }, []);
+
+  const clearRpsRevealTimers = useCallback(() => {
+    rpsRevealTimersRef.current.forEach((timer) =>
+      window.clearTimeout(timer),
+    );
+    rpsRevealTimersRef.current = [];
+  }, []);
+
+  useEffect(
+    () => () => {
+      rpsRevealTokenRef.current += 1;
+      clearRpsRevealTimers();
+    },
+    [clearRpsRevealTimers],
+  );
+
+  useEffect(() => {
+    if (
+      !rpsMatch ||
+      rpsMatch.status !== "active" ||
+      (rpsRevealPhase !== "choosing" && rpsRevealPhase !== "spinning")
+    ) {
+      return;
+    }
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      return;
+    }
+
+    const interval = rpsRevealPhase === "spinning" ? 72 : 125;
+    const timer = window.setInterval(() => {
+      const nextIndex = (rpsLampIndexRef.current + 1) % RPS_MOVES.length;
+      setActiveRpsLamp(RPS_MOVES[nextIndex].id);
+    }, interval);
+    return () => window.clearInterval(timer);
+  }, [rpsMatch, rpsRevealPhase, setActiveRpsLamp]);
 
   useEffect(() => {
     const activeMatch = gameState?.rpsMatch;
@@ -969,9 +1021,20 @@ export default function ArcadeClient() {
       );
       setRpsMatchType(activeMatch.matchType);
       setRpsBetAmount(String(activeMatch.playerBet));
+      if (rpsMatch?.id !== activeMatch.id) {
+        const lastRound = activeMatch.history.at(-1) ?? null;
+        setRpsRound(lastRound);
+        setRpsPlayerChoice(lastRound?.playerMove ?? null);
+        if (lastRound) {
+          setActiveRpsLamp(lastRound.aiMove);
+          setRpsRevealPhase("revealed");
+        } else {
+          setRpsRevealPhase("choosing");
+        }
+      }
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [gameState?.rpsMatch]);
+  }, [gameState?.rpsMatch, rpsMatch?.id, setActiveRpsLamp]);
 
   const startRpsMatch = async () => {
     if (activeSessionRef.current && rpsMatch?.status !== "active") {
@@ -1003,7 +1066,17 @@ export default function ArcadeClient() {
     setRpsMatch(response.rpsMatch);
     setRpsMatchType(response.rpsMatch.matchType);
     setRpsBetAmount(String(response.rpsMatch.playerBet));
-    setRpsRound(response.rpsMatch.history.at(-1) ?? null);
+    const resumedRound = response.resumed
+      ? response.rpsMatch.history.at(-1) ?? null
+      : null;
+    setRpsRound(resumedRound);
+    setRpsPlayerChoice(resumedRound?.playerMove ?? null);
+    if (resumedRound) {
+      setActiveRpsLamp(resumedRound.aiMove);
+      setRpsRevealPhase("revealed");
+    } else {
+      setRpsRevealPhase("choosing");
+    }
     playTone(response.resumed ? 420 : 610, 0.13);
     showNotice(
       response.resumed
@@ -1013,65 +1086,132 @@ export default function ArcadeClient() {
     );
   };
 
+  const revealRpsResponse = (response: ApiResponse, revealToken: number) => {
+    if (!response.state || !response.rpsMatch || !response.round) return;
+    if (revealToken !== rpsRevealTokenRef.current) return;
+
+    clearRpsRevealTimers();
+    setRpsRevealPhase("slowing");
+    const reduceMotion = window.matchMedia(
+      "(prefers-reduced-motion: reduce)",
+    ).matches;
+    const startIndex = rpsLampIndexRef.current;
+    const targetIndex = RPS_MOVES.findIndex(
+      (move) => move.id === response.round!.aiMove,
+    );
+    const revealSteps = createRpsRevealSteps(
+      startIndex,
+      targetIndex,
+      reduceMotion,
+    );
+    let elapsed = 0;
+
+    revealSteps.forEach((step, index) => {
+      elapsed += step.delay;
+      const isFinal = index === revealSteps.length - 1;
+      const move = RPS_MOVES[step.index].id;
+      const timer = window.setTimeout(() => {
+        if (revealToken !== rpsRevealTokenRef.current) return;
+        setActiveRpsLamp(move);
+        playTone(isFinal ? 760 : 330 + index * 34, isFinal ? 0.16 : 0.045, 0.025);
+
+        if (!isFinal) return;
+        setGameState(response.state!);
+        setRpsMatch(response.rpsMatch!);
+        setRpsRound(response.round!);
+        setRpsPlayerChoice(response.round!.playerMove);
+        setRpsRevealPhase("revealed");
+        rpsPlayBusyRef.current = false;
+
+        const roundTone =
+          response.round!.result === "win"
+            ? 880
+            : response.round!.result === "lose"
+              ? 170
+              : 470;
+        window.setTimeout(
+          () => playTone(roundTone, 0.18, 0.04),
+          reduceMotion ? 0 : 160,
+        );
+
+        if (response.rpsMatch!.status === "completed") {
+          activeSessionRef.current = false;
+          const won = response.rpsMatch!.winner === "player";
+          showNotice(
+            won
+              ? `최종 승리! AI 배팅금 ${formatCoins(response.rpsMatch!.aiBet)}을 받았습니다.`
+              : `최종 패배. 배팅금 ${formatCoins(response.rpsMatch!.playerBet)}이 소멸됐습니다.`,
+            won ? "good" : "bad",
+          );
+          return;
+        }
+
+        showNotice(
+          response.round!.result === "win"
+            ? "이번 판 승리! 다음 게임을 준비하세요."
+            : response.round!.result === "lose"
+              ? "이번 판 패배. 다음 게임에서 뒤집어보세요."
+              : "무승부! 승수 변화 없이 다음 게임으로 갑니다.",
+          response.round!.result === "win"
+            ? "good"
+            : response.round!.result === "lose"
+              ? "bad"
+              : "plain",
+        );
+      }, elapsed);
+      rpsRevealTimersRef.current.push(timer);
+    });
+  };
+
   const playRpsMove = async (move: RpsMove) => {
     if (
       !rpsMatch ||
       rpsMatch.status !== "active" ||
-      rpsPlayBusyRef.current
+      rpsPlayBusyRef.current ||
+      rpsRevealPhase !== "choosing"
     ) {
       return;
     }
     rpsPlayBusyRef.current = true;
+    const revealToken = rpsRevealTokenRef.current + 1;
+    rpsRevealTokenRef.current = revealToken;
+    setRpsPlayerChoice(move);
+    setRpsRound(null);
+    setRpsRevealPhase("spinning");
+    playTone(540, 0.08, 0.03);
     const response = await runAction("rps_play", {
       action: "rps_play",
       matchId: rpsMatch.id,
       turn: rpsMatch.nextTurn,
       move,
     });
-    rpsPlayBusyRef.current = false;
-    if (!response?.state || !response.rpsMatch || !response.round) return;
-
-    setGameState(response.state);
-    setRpsMatch(response.rpsMatch);
-    setRpsRound(response.round);
-    const roundTone =
-      response.round.result === "win"
-        ? 780
-        : response.round.result === "lose"
-          ? 190
-          : 420;
-    playTone(roundTone, 0.14, 0.04);
-
-    if (response.rpsMatch.status === "completed") {
-      activeSessionRef.current = false;
-      const won = response.rpsMatch.winner === "player";
-      showNotice(
-        won
-          ? `최종 승리! AI 배팅금 ${formatCoins(response.rpsMatch.aiBet)}을 받았습니다.`
-          : `최종 패배. 배팅금 ${formatCoins(response.rpsMatch.playerBet)}이 소멸됐습니다.`,
-        won ? "good" : "bad",
-      );
+    if (revealToken !== rpsRevealTokenRef.current) return;
+    if (!response?.state || !response.rpsMatch || !response.round) {
+      rpsPlayBusyRef.current = false;
+      setRpsPlayerChoice(null);
+      setRpsRevealPhase("choosing");
       return;
     }
+    revealRpsResponse(response, revealToken);
+  };
 
-    showNotice(
-      response.round.result === "win"
-        ? "이번 판 승리! 다음 AI 패가 정해졌습니다."
-        : response.round.result === "lose"
-          ? "이번 판 패배. 다음 패를 선택해주세요."
-          : "무승부! 승수 변화 없이 다시 겨룹니다.",
-      response.round.result === "win"
-        ? "good"
-        : response.round.result === "lose"
-          ? "bad"
-          : "plain",
-    );
+  const prepareNextRpsRound = () => {
+    if (rpsMatch?.status !== "active" || rpsRevealPhase !== "revealed") return;
+    setRpsRound(null);
+    setRpsPlayerChoice(null);
+    setRpsRevealPhase("choosing");
+    playTone(520, 0.1, 0.03);
   };
 
   const resetRpsMatch = () => {
     if (rpsMatch?.status === "active") return;
+    rpsRevealTokenRef.current += 1;
+    clearRpsRevealTimers();
+    rpsPlayBusyRef.current = false;
     setRpsMatch(null);
     setRpsRound(null);
+    setRpsPlayerChoice(null);
+    setRpsRevealPhase("choosing");
     setRpsBetAmount("");
   };
 
@@ -1081,10 +1221,18 @@ export default function ArcadeClient() {
   const [timingGame, setTimingGame] = useState<TimingGame | null>(null);
   const [timingResult, setTimingResult] = useState<TimingResult | null>(null);
   const [timingPhase, setTimingPhase] = useState<TimingPhase>("setup");
+  const [timingCountdown, setTimingCountdown] = useState(3);
   const [timingElapsedHundredths, setTimingElapsedHundredths] = useState(0);
   const timingStartRef = useRef<number | null>(null);
   const timingFrameRef = useRef<number | null>(null);
   const timingStopBusyRef = useRef(false);
+  const timingLaunchBusyRef = useRef(false);
+  const timingCountdownDeadlineRef = useRef<number | null>(null);
+  const timingCountdownValueRef = useRef(3);
+  const timingPendingStartRef = useRef<{
+    target: (typeof TIMING_TARGETS)[number];
+    betAmount: number;
+  } | null>(null);
 
   useEffect(() => {
     const activeGame = gameState?.timing.activeGame;
@@ -1130,7 +1278,93 @@ export default function ArcadeClient() {
     };
   }, [timingGame, timingPhase]);
 
-  const startTimingGame = async () => {
+  const launchTimingRun = useCallback(async () => {
+    const pending = timingPendingStartRef.current;
+    if (!pending || timingLaunchBusyRef.current) return;
+    timingLaunchBusyRef.current = true;
+    const response = await runAction("timing_start", {
+      action: "timing_start",
+      target: pending.target,
+      betAmount: pending.betAmount,
+    });
+    timingLaunchBusyRef.current = false;
+    if (!response?.state || !response.timingGame) {
+      timingPendingStartRef.current = null;
+      timingCountdownDeadlineRef.current = null;
+      timingCountdownValueRef.current = 3;
+      activeSessionRef.current = false;
+      setTimingCountdown(3);
+      setTimingPhase("setup");
+      return;
+    }
+
+    setGameState(response.state);
+    setTimingGame(response.timingGame);
+    setTimingTarget(
+      response.timingGame.target as (typeof TIMING_TARGETS)[number],
+    );
+    setTimingBetAmount(String(response.timingGame.betAmount));
+    const resumedElapsedHundredths = response.resumed
+      ? Math.max(
+          0,
+          Math.floor((Date.now() - response.timingGame.startedAt) / 10),
+        )
+      : 0;
+    setTimingResult(null);
+    setTimingElapsedHundredths(resumedElapsedHundredths);
+    timingPendingStartRef.current = null;
+    timingCountdownDeadlineRef.current = null;
+    timingStartRef.current =
+      performance.now() - resumedElapsedHundredths * 10;
+    setTimingPhase("running");
+    playTone(860, 0.16, 0.04);
+  }, [
+    playTone,
+    runAction,
+    setGameState,
+    setTimingBetAmount,
+    setTimingCountdown,
+    setTimingElapsedHundredths,
+    setTimingGame,
+    setTimingPhase,
+    setTimingResult,
+    setTimingTarget,
+  ]);
+
+  useEffect(() => {
+    if (timingPhase !== "countdown") return;
+    const updateCountdown = () => {
+      const deadline = timingCountdownDeadlineRef.current;
+      if (deadline === null) return;
+      const nextCount = Math.max(
+        0,
+        Math.ceil((deadline - performance.now()) / 1_000),
+      );
+      if (nextCount === timingCountdownValueRef.current) return;
+      timingCountdownValueRef.current = nextCount;
+      setTimingCountdown(nextCount);
+      playTone(
+        nextCount === 0 ? 820 : 440 + nextCount * 70,
+        0.1,
+        0.032,
+      );
+    };
+
+    updateCountdown();
+    const timer = window.setInterval(updateCountdown, 50);
+    return () => window.clearInterval(timer);
+  }, [playTone, timingPhase]);
+
+  useEffect(() => {
+    if (timingPhase !== "countdown" || timingCountdown > 0) return;
+    const launchTimer = window.setTimeout(
+      () => void launchTimingRun(),
+      180,
+    );
+    return () => window.clearTimeout(launchTimer);
+  }, [launchTimingRun, timingCountdown, timingPhase]);
+
+  const startTimingGame = () => {
     if (activeSessionRef.current) {
       showNotice("진행 중인 게임을 먼저 마무리해주세요.", "bad");
       return;
@@ -1146,27 +1380,18 @@ export default function ArcadeClient() {
     }
 
     activeSessionRef.current = true;
-    const response = await runAction("timing_start", {
-      action: "timing_start",
+    timingPendingStartRef.current = {
       target: timingTarget,
       betAmount,
-    });
-    if (!response?.state || !response.timingGame) {
-      activeSessionRef.current = false;
-      return;
-    }
-
-    setGameState(response.state);
-    setTimingGame(response.timingGame);
-    setTimingTarget(
-      response.timingGame.target as (typeof TIMING_TARGETS)[number],
-    );
-    setTimingBetAmount(String(response.timingGame.betAmount));
+    };
     setTimingResult(null);
     setTimingElapsedHundredths(0);
-    timingStartRef.current = performance.now();
-    setTimingPhase("running");
-    playTone(640, 0.12, 0.035);
+    setTimingCountdown(3);
+    timingCountdownValueRef.current = 3;
+    timingCountdownDeadlineRef.current = performance.now() + 3_000;
+    timingStartRef.current = null;
+    setTimingPhase("countdown");
+    playTone(650, 0.12, 0.035);
   };
 
   const settleTimingGame = async (elapsedHundredths: number) => {
@@ -1220,9 +1445,14 @@ export default function ArcadeClient() {
   const resetTimingGame = () => {
     setTimingGame(null);
     setTimingResult(null);
+    setTimingCountdown(3);
+    timingCountdownValueRef.current = 3;
     setTimingElapsedHundredths(0);
     setTimingPhase("setup");
     timingStartRef.current = null;
+    timingPendingStartRef.current = null;
+    timingCountdownDeadlineRef.current = null;
+    timingLaunchBusyRef.current = false;
   };
 
   const currentHorsePool =
@@ -1288,8 +1518,8 @@ export default function ArcadeClient() {
   if (loading && !gameState) {
     return (
       <main className="app-shell app-loading" aria-busy="true">
-        <span className="loading-orb">?</span>
-        <p>오늘의 확률과 지갑을 준비하고 있어요…</p>
+        <span className="loading-orb">✦</span>
+        <p>황야의 살롱과 오늘의 승부를 준비하고 있어요…</p>
       </main>
     );
   }
@@ -1302,11 +1532,11 @@ export default function ArcadeClient() {
       <header className="site-header site-header--economy">
         <a className="brand" href="#top" aria-label="운빨 실험실 홈">
           <span className="brand-mark" aria-hidden="true">
-            <span>?</span>
+            <span>✦</span>
           </span>
           <span className="brand-copy">
             <strong>운빨 실험실</strong>
-            <small>COIN LUCK ARCADE</small>
+            <small>FRONTIER LUCK CLUB</small>
           </span>
         </a>
 
@@ -1329,7 +1559,7 @@ export default function ArcadeClient() {
 
         <div className="wallet-tools">
           <div className="wallet-balance" aria-label="내 지갑">
-            <span>MY WALLET</span>
+            <span>SADDLE BAG</span>
             <strong>{formatCoins(visibleBalance)}</strong>
           </div>
           <button
@@ -1338,14 +1568,14 @@ export default function ArcadeClient() {
             onClick={handleEarn}
             disabled={earnCooldown > 0 || busyAction === "earn"}
           >
-            {earnCooldown > 0 ? `${earnCooldown}초` : "랜덤 C 받기"}
+            {earnCooldown > 0 ? `${earnCooldown}초` : "현상금 C 받기"}
           </button>
           <button
             type="button"
             className="luck-save-button"
             onClick={() => setLuckOpen(true)}
           >
-            운 저장하기
+            행운 금고
           </button>
           <button
             className="sound-toggle sound-toggle--compact"
@@ -1363,24 +1593,24 @@ export default function ArcadeClient() {
         <div className="intro-copy">
           <p className="eyebrow">
             <span className="status-dot" aria-hidden="true" />
-            1,000,000 C에서 시작하는 운의 경제
+            1,000,000 C를 들고 황야에 들어선 신규 총잡이
           </p>
           <h1>
-            운을 쓰고,
+            운을 걸고,
             <br />
-            <span>코인을 불려보세요.</span>
+            <span>황야의 전설이 되세요.</span>
           </h1>
           <p className="intro-description">
-            일곱 가지 게임으로 시험하는 오늘의 운과 실시간 모의 주식 시장.
+            일곱 개의 승부가 열리는 디지털 프런티어 살롱.
             <br />
-            모든 코인은 게임 속 재화이며 실제 가치가 없습니다.
+            코인을 걸고, 숨을 고르고, 오늘의 행운을 쟁취하세요.
           </p>
         </div>
 
         <aside className="economy-receipt" aria-label="내 운빨 계좌">
           <div className="receipt-topline">
-            <span>LUCK ACCOUNT</span>
-            <span>LIVE</span>
+            <span>COWBOY LEDGER</span>
+            <span>OPEN</span>
           </div>
           <div className="account-owner">
             <span>{accountOwner.displayName.slice(0, 1).toUpperCase()}</span>
@@ -1411,7 +1641,7 @@ export default function ArcadeClient() {
         </aside>
       </section>
 
-      <section className="game-stage game-stage--expanded" aria-live="polite">
+      <section className="game-stage game-stage--expanded">
         <div
           id="lotto-panel"
           className={`game-panel ${activeGame === "lotto" ? "is-active" : ""}`}
@@ -2638,7 +2868,7 @@ export default function ArcadeClient() {
         >
           <div className="panel-heading panel-heading--rps">
             <div>
-              <p className="game-number">GAME 06 · AI HAND DUEL</p>
+              <p className="game-number">GAME 06 · SALOON HAND DUEL</p>
               <h2>가위바위보</h2>
               <p>
                 AI와 승부를 겨루고 최종 승리하면 AI가 건 코인을
@@ -2751,7 +2981,17 @@ export default function ArcadeClient() {
               </aside>
             </div>
           ) : (
-            <section className="rps-arena" aria-live="polite">
+            <section
+              className={`rps-arena ${
+                rpsRevealPhase === "choosing"
+                  ? "is-choosing"
+                  : rpsRevealPhase === "spinning"
+                    ? "is-locking"
+                    : rpsRevealPhase === "slowing"
+                      ? "is-settling"
+                      : "is-revealed"
+              }`}
+            >
               <div className="rps-scoreboard">
                 <div>
                   <span>PLAYER</span>
@@ -2776,35 +3016,70 @@ export default function ArcadeClient() {
               </div>
 
               <div className="rps-duel">
-                <article className="rps-hand-card">
-                  <span>AI · 직전 패</span>
-                  <strong aria-hidden="true">
-                    {rpsRound ? rpsMoveMeta(rpsRound.aiMove).icon : "?"}
-                  </strong>
+                <article
+                  className={`rps-hand-card is-ai ${
+                    rpsRevealPhase === "spinning" ||
+                    rpsRevealPhase === "slowing"
+                      ? "is-spinning"
+                      : ""
+                  } ${
+                    rpsRevealPhase === "revealed" ? "is-revealed" : ""
+                  }`}
+                >
+                  <span>AI · SELECT REEL</span>
+                  <div className="rps-machine-lamps" aria-hidden="true">
+                    {RPS_MOVES.map((move) => (
+                      <span
+                        key={move.id}
+                        className={`rps-machine-lamp ${
+                          rpsLampMove === move.id ? "is-lit" : ""
+                        }`}
+                      >
+                        <i>{move.icon}</i>
+                        <small>{move.label}</small>
+                      </span>
+                    ))}
+                  </div>
                   <small>
-                    {rpsRound
+                    {rpsRevealPhase === "revealed" && rpsRound
                       ? rpsMoveMeta(rpsRound.aiMove).label
-                      : "선택 완료 · 공개 전"}
+                      : rpsRevealPhase === "choosing"
+                        ? "릴 회전 중 · 패를 선택하세요"
+                        : rpsRevealPhase === "spinning"
+                          ? "PLAYER LOCKED"
+                          : "감속 중…"}
                   </small>
                 </article>
                 <div className="rps-vs" aria-hidden="true">
                   VS
                 </div>
-                <article className="rps-hand-card">
-                  <span>PLAYER · 직전 패</span>
+                <article
+                  className={`rps-hand-card is-player ${
+                    rpsPlayerChoice ? "is-locked" : ""
+                  } ${
+                    rpsRevealPhase === "revealed" ? "is-revealed" : ""
+                  }`}
+                >
+                  <span>PLAYER · YOUR HAND</span>
                   <strong aria-hidden="true">
-                    {rpsRound ? rpsMoveMeta(rpsRound.playerMove).icon : "?"}
+                    {rpsPlayerChoice
+                      ? rpsMoveMeta(rpsPlayerChoice).icon
+                      : "?"}
                   </strong>
                   <small>
-                    {rpsRound
-                      ? rpsMoveMeta(rpsRound.playerMove).label
+                    {rpsPlayerChoice
+                      ? rpsMoveMeta(rpsPlayerChoice).label
                       : "아래에서 패 선택"}
                   </small>
                 </article>
               </div>
 
-              {rpsRound && (
-                <p className={`rps-round-result is-${rpsRound.result}`}>
+              {rpsRound && rpsRevealPhase === "revealed" && (
+                <p
+                  className={`rps-round-result is-${rpsRound.result}`}
+                  role="status"
+                  aria-live="polite"
+                >
                   {rpsRound.result === "win"
                     ? "이번 판 승리"
                     : rpsRound.result === "lose"
@@ -2815,23 +3090,55 @@ export default function ArcadeClient() {
 
               {rpsMatch.status === "active" ? (
                 <>
-                  <div className="rps-status-line">
+                  <div
+                    className="rps-status-line"
+                    role="status"
+                    aria-live="polite"
+                    aria-atomic="true"
+                  >
                     <span className="status-dot" aria-hidden="true" />
-                    AI의 다음 패는 이미 정해졌습니다 · 패를 선택하면 즉시 공개
+                    {rpsRevealPhase === "choosing"
+                      ? "AI 선택 릴이 회전 중입니다 · 가위, 바위, 보를 고르세요"
+                      : rpsRevealPhase === "spinning"
+                        ? "내 선택을 고정했습니다 · AI 릴을 더 빠르게 돌리는 중"
+                        : rpsRevealPhase === "slowing"
+                          ? "두구두구… 릴이 느려지며 결과에 가까워집니다"
+                          : "이번 승부가 끝났습니다 · 다음 게임으로 이어가세요"}
                   </div>
-                  <div className="rps-move-grid" aria-label="가위바위보 패 선택">
-                    {RPS_MOVES.map((move) => (
-                      <button
-                        type="button"
-                        key={move.id}
-                        disabled={busyAction === "rps_play"}
-                        onClick={() => void playRpsMove(move.id)}
-                      >
-                        <span aria-hidden="true">{move.icon}</span>
-                        <strong>{move.label}</strong>
-                      </button>
-                    ))}
-                  </div>
+                  {rpsRevealPhase === "revealed" ? (
+                    <button
+                      type="button"
+                      className="rps-next-round-button"
+                      onClick={prepareNextRpsRound}
+                    >
+                      다음 게임
+                      <span aria-hidden="true">→</span>
+                    </button>
+                  ) : (
+                    <div
+                      className="rps-move-grid"
+                      aria-label="가위바위보 패 선택"
+                    >
+                      {RPS_MOVES.map((move) => (
+                        <button
+                          type="button"
+                          key={move.id}
+                          className={
+                            rpsPlayerChoice === move.id ? "is-selected" : ""
+                          }
+                          aria-pressed={rpsPlayerChoice === move.id}
+                          disabled={
+                            busyAction === "rps_play" ||
+                            rpsRevealPhase !== "choosing"
+                          }
+                          onClick={() => void playRpsMove(move.id)}
+                        >
+                          <span aria-hidden="true">{move.icon}</span>
+                          <strong>{move.label}</strong>
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </>
               ) : (
                 <div
@@ -2905,7 +3212,7 @@ export default function ArcadeClient() {
         >
           <div className="panel-heading panel-heading--timing">
             <div>
-              <p className="game-number">GAME 07 · STOP AT THE MOMENT</p>
+              <p className="game-number">GAME 07 · HIGH NOON STOPWATCH</p>
               <h2>타이밍의 신</h2>
               <p>
                 목표 시간과 소수점 둘째 자리까지 정확히 일치하는 순간에
@@ -3035,14 +3342,28 @@ export default function ArcadeClient() {
             <section
               className={`timing-arena ${
                 timingResult?.success ? "is-success" : ""
+              } ${
+                timingPhase === "countdown" ? "is-countdown" : ""
               }`}
-              aria-live="polite"
             >
-              <div className="timing-status">
+              <div
+                className="timing-status"
+                role="status"
+                aria-live="polite"
+                aria-atomic="true"
+              >
                 <span
-                  className={timingPhase === "running" ? "is-live" : ""}
+                  className={
+                    timingPhase === "running"
+                      ? "is-live"
+                      : timingPhase === "countdown"
+                        ? "is-countdown"
+                        : ""
+                  }
                 >
-                  {timingPhase === "running"
+                  {timingPhase === "countdown"
+                    ? "START"
+                    : timingPhase === "running"
                     ? "LIVE"
                     : timingPhase === "stopped"
                       ? "CHECK"
@@ -3051,7 +3372,11 @@ export default function ArcadeClient() {
                         : "MISS"}
                 </span>
                 <p>
-                  {timingPhase === "running"
+                  {timingPhase === "countdown"
+                    ? timingCountdown > 0
+                      ? `${timingCountdown}초 · 신호가 하나씩 꺼집니다. 모두 꺼질 때까지 기다리세요.`
+                      : "모든 신호가 꺼졌습니다. 결투 시작을 맞추고 있습니다!"
+                    : timingPhase === "running"
                     ? "지금 흐르는 시간을 보고 정확한 순간에 멈추세요."
                     : timingPhase === "stopped"
                       ? "클릭한 순간을 정산하고 있습니다."
@@ -3061,99 +3386,134 @@ export default function ArcadeClient() {
                 </p>
               </div>
 
-              <div
-                className={`timing-clock ${
-                  timingPhase === "running" ? "is-running" : ""
-                }`}
-                aria-label={`현재 ${formatStopwatch(timingElapsedHundredths)}초`}
-              >
-                <span>{formatStopwatch(timingElapsedHundredths)}</span>
-                <small>SECONDS</small>
-              </div>
-
-              <div className="timing-target-line">
-                <span>목표 시간</span>
-                <strong>{timingGame?.target.toFixed(2)}초</strong>
-                <i aria-hidden="true">◎</i>
-                <span>도전 배수</span>
-                <strong>{timingGame?.multiplier.toFixed(1)}배</strong>
-              </div>
-
-              {timingPhase !== "result" ? (
-                <button
-                  type="button"
-                  className="timing-stop-button"
-                  onClick={
-                    timingPhase === "running"
-                      ? stopTimingGame
-                      : () =>
-                          void settleTimingGame(timingElapsedHundredths)
-                  }
-                  disabled={busyAction === "timing_stop"}
-                >
-                  {timingPhase === "running"
-                    ? "지금 멈추기"
-                    : busyAction === "timing_stop"
-                      ? "결과 확인 중…"
-                      : "정산 다시 시도"}
-                </button>
-              ) : (
-                timingResult && (
+              {timingPhase === "countdown" ? (
+                <div className="timing-countdown-sequence">
                   <div
-                    className={`timing-result ${
-                      timingResult.success ? "is-success" : "is-failure"
-                    }`}
+                    className="timing-start-lights"
+                    aria-hidden="true"
                   >
-                    <div className="timing-difference">
-                      <span>목표와의 차이</span>
-                      <strong>
-                        {timingDifference > 0 ? "+" : ""}
-                        {(timingDifference / 100).toFixed(2)}초
-                      </strong>
-                    </div>
-                    <dl>
-                      <div>
-                        <dt>최종 기록</dt>
-                        <dd>
-                          {formatStopwatch(timingResult.elapsedHundredths)}초
-                        </dd>
-                      </div>
-                      <div>
-                        <dt>
-                          {timingResult.success ? "총 지급액" : "소멸 배팅금"}
-                        </dt>
-                        <dd>
-                          {formatCoins(
-                            timingResult.success
-                              ? timingResult.payout
-                              : timingResult.betAmount,
-                          )}
-                        </dd>
-                      </div>
-                      <div>
-                        <dt>다음 배수</dt>
-                        <dd>
-                          {(
-                            gameState?.timing.currentMultiplier ?? 1.1
-                          ).toFixed(1)}
-                          배
-                        </dd>
-                      </div>
-                    </dl>
-                    <p>
-                      {timingResult.success
-                        ? "성공으로 연속 실패 기록과 배수가 초기화됐습니다."
-                        : `연속 실패 ${timingResult.failureStreak}회 · 다음 성공 보상이 더 커집니다.`}
-                    </p>
+                    {[0, 1, 2].map((index) => (
+                      <span
+                        key={index}
+                        className={`timing-start-light ${
+                          index < timingCountdown ? "is-lit" : ""
+                        }`}
+                        aria-hidden="true"
+                      />
+                    ))}
+                  </div>
+                  <strong className="timing-countdown-copy">
+                    {timingCountdown > 0 ? timingCountdown : "GO"}
+                  </strong>
+                  <p>
+                    목표 {timingTarget.toFixed(2)}초 · 신호가 모두 꺼진 뒤
+                    시간이 흐릅니다.
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <div
+                    className={`timing-clock ${
+                      timingPhase === "running" ? "is-running" : ""
+                    }`}
+                    aria-label={`현재 ${formatStopwatch(timingElapsedHundredths)}초`}
+                  >
+                    <span>{formatStopwatch(timingElapsedHundredths)}</span>
+                    <small>SECONDS</small>
+                  </div>
+
+                  <div className="timing-target-line">
+                    <span>목표 시간</span>
+                    <strong>{timingGame?.target.toFixed(2)}초</strong>
+                    <i aria-hidden="true">◎</i>
+                    <span>도전 배수</span>
+                    <strong>{timingGame?.multiplier.toFixed(1)}배</strong>
+                  </div>
+
+                  {timingPhase !== "result" ? (
                     <button
                       type="button"
-                      className="timing-again-button"
-                      onClick={resetTimingGame}
+                      className="timing-stop-button"
+                      onClick={
+                        timingPhase === "running"
+                          ? stopTimingGame
+                          : () =>
+                              void settleTimingGame(timingElapsedHundredths)
+                      }
+                      disabled={busyAction === "timing_stop"}
                     >
-                      다시 도전하기
+                      {timingPhase === "running"
+                        ? "지금 멈추기"
+                        : busyAction === "timing_stop"
+                          ? "결과 확인 중…"
+                          : "정산 다시 시도"}
                     </button>
-                  </div>
-                )
+                  ) : (
+                    timingResult && (
+                      <div
+                        className={`timing-result ${
+                          timingResult.success
+                            ? "is-success"
+                            : "is-failure"
+                        }`}
+                      >
+                        <div className="timing-difference">
+                          <span>목표와의 차이</span>
+                          <strong>
+                            {timingDifference > 0 ? "+" : ""}
+                            {(timingDifference / 100).toFixed(2)}초
+                          </strong>
+                        </div>
+                        <dl>
+                          <div>
+                            <dt>최종 기록</dt>
+                            <dd>
+                              {formatStopwatch(
+                                timingResult.elapsedHundredths,
+                              )}
+                              초
+                            </dd>
+                          </div>
+                          <div>
+                            <dt>
+                              {timingResult.success
+                                ? "총 지급액"
+                                : "소멸 배팅금"}
+                            </dt>
+                            <dd>
+                              {formatCoins(
+                                timingResult.success
+                                  ? timingResult.payout
+                                  : timingResult.betAmount,
+                              )}
+                            </dd>
+                          </div>
+                          <div>
+                            <dt>다음 배수</dt>
+                            <dd>
+                              {(
+                                gameState?.timing.currentMultiplier ?? 1.1
+                              ).toFixed(1)}
+                              배
+                            </dd>
+                          </div>
+                        </dl>
+                        <p>
+                          {timingResult.success
+                            ? "성공으로 연속 실패 기록과 배수가 초기화됐습니다."
+                            : `연속 실패 ${timingResult.failureStreak}회 · 다음 성공 보상이 더 커집니다.`}
+                        </p>
+                        <button
+                          type="button"
+                          className="timing-again-button"
+                          onClick={resetTimingGame}
+                        >
+                          다시 도전하기
+                        </button>
+                      </div>
+                    )
+                  )}
+                </>
               )}
             </section>
           )}
@@ -3175,9 +3535,9 @@ export default function ArcadeClient() {
 
       <section className="account-ledger">
         <div>
-          <p className="eyebrow">COIN LEDGER</p>
-          <h2>최근 코인 기록</h2>
-          <p>게임, 투자, 저장으로 움직인 코인을 한눈에 확인하세요.</p>
+          <p className="eyebrow">OUTLAW LEDGER</p>
+          <h2>오늘의 전리품 장부</h2>
+          <p>승부와 거래로 오간 코인을 보안관 장부처럼 확인하세요.</p>
         </div>
         <div className="ledger-list">
           {gameState?.transactions.length ? (
@@ -3216,7 +3576,7 @@ export default function ArcadeClient() {
       <footer className="site-footer">
         <div className="footer-brand">
           <span className="brand-mark brand-mark--small" aria-hidden="true">
-            ?
+            ✦
           </span>
           <strong>운빨 실험실</strong>
         </div>

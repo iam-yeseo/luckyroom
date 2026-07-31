@@ -28,6 +28,7 @@ import {
   createPaperBoard,
   createRpsAiBet,
   createRpsMove,
+  createRpsRevealSteps,
   derivativeRate,
   drawUniqueNumbers,
   evaluateLotto,
@@ -266,6 +267,36 @@ test("rock-paper-scissors evaluator covers wins, losses, and draws", () => {
 
   assert.throws(() => evaluateRpsRound("invalid", "rock"), RangeError);
   assert.throws(() => evaluateRpsRound("rock", "invalid"), RangeError);
+});
+
+test("rock-paper-scissors reveal slows cyclically and lands on every AI move", () => {
+  for (let startIndex = 0; startIndex < 3; startIndex += 1) {
+    for (let targetIndex = 0; targetIndex < 3; targetIndex += 1) {
+      const steps = createRpsRevealSteps(startIndex, targetIndex);
+      assert.ok(steps.length >= 10 && steps.length <= 12);
+      assert.equal(steps.at(-1).index, targetIndex);
+      assert.ok(
+        steps.every(
+          (step, index) =>
+            step.index === (startIndex + index + 1) % 3 &&
+            step.delay >= 70 &&
+            step.delay <= 330,
+        ),
+      );
+      assert.ok(
+        steps.every(
+          (step, index) =>
+            index === 0 || step.delay >= steps[index - 1].delay,
+        ),
+      );
+    }
+  }
+
+  assert.deepEqual(createRpsRevealSteps(0, 2, true), [
+    { index: 2, delay: 180 },
+  ]);
+  assert.throws(() => createRpsRevealSteps(-1, 0), RangeError);
+  assert.throws(() => createRpsRevealSteps(0, 3), RangeError);
 });
 
 test("rock-paper-scissors score advances only to the configured win target", () => {
